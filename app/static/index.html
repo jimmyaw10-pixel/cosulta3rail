@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Consulta de factura IBAL</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --blue: #4c9adf;
+      --teal: #36b9cc;
+      --navy: #2e59d9;
+      --ink: #3a3b45;
+      --muted: #858796;
+      --bg: #f4f6fb;
+      --card: #fff;
+      --red: #e74a3b;
+      --green: #1cc88a;
+      --shadow: 0 10px 30px rgba(46, 89, 217, 0.08);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: Inter, system-ui, sans-serif;
+      background:
+        radial-gradient(1200px 400px at 10% -10%, #d7e8ff 0%, transparent 50%),
+        radial-gradient(900px 400px at 100% 0%, #d4f3f7 0%, transparent 45%),
+        var(--bg);
+      color: var(--ink);
+      min-height: 100vh;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #3182ce, #2e59d9);
+      display: grid;
+      place-items: center;
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(46, 89, 217, 0.28);
+    }
+
+    .brand h1 {
+      font-size: 1.15rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .brand p {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .search {
+      background: var(--card);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+      margin-bottom: 24px;
+    }
+
+    .search label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      border: 1.5px solid #d8dde8;
+      border-radius: 12px;
+      padding: 14px 16px;
+      font: inherit;
+      font-size: 1.05rem;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input[type="text"]:focus {
+      border-color: var(--navy);
+      box-shadow: 0 0 0 4px rgba(46, 89, 217, 0.12);
+    }
+
+    button {
+      border: 0;
+      border-radius: 12px;
+      background: #3182ce;
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      padding: 0 22px;
+      cursor: pointer;
+      min-width: 132px;
+    }
+
+    button:hover { background: #2c73b8; }
+    button:disabled { opacity: 0.65; cursor: wait; }
+
+    .hint {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 18px 18px 16px;
+      min-height: 148px;
+      position: relative;
+      overflow: hidden;
+      border-left: 5px solid var(--accent, var(--blue));
+    }
+
+    .card.blue { --accent: var(--blue); --label: var(--blue); }
+    .card.teal { --accent: var(--teal); --label: var(--teal); }
+    .card.navy { --accent: var(--navy); --label: var(--navy); }
+
+    .label {
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--label);
+      margin-bottom: 8px;
+    }
+
+    .value {
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: #2d2e37;
+      line-height: 1.2;
+      word-break: break-word;
+    }
+
+    .value.small { font-size: 1.02rem; }
+    .value.total { font-size: 1.7rem; }
+
+    .sub {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .status {
+      margin-top: 10px;
+      font-weight: 800;
+      font-size: 0.95rem;
+    }
+
+    .status.unpaid { color: var(--red); }
+    .status.paid { color: var(--green); }
+
+    .icon {
+      position: absolute;
+      right: 14px;
+      bottom: 12px;
+      opacity: 0.7;
+    }
+
+    .message, .empty, .loading {
+      background: var(--card);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 28px 22px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .message.error { color: #9b2c2c; background: #fff5f5; }
+    .message.ok { color: #2f5d4a; }
+
+    .hidden { display: none; }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 4px solid #dbe7f8;
+      border-top-color: #3182ce;
+      border-radius: 50%;
+      margin: 0 auto 12px;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
+    }
+
+    footer a { color: var(--navy); }
+
+    @media (max-width: 980px) {
+      .cards { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .cards { grid-template-columns: 1fr; }
+      .row { flex-direction: column; }
+      button { height: 48px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2s7 7.2 7 12.2A7 7 0 1 1 5 14.2C5 9.2 12 2 12 2z"/>
+          </svg>
+        </div>
+        <div>
+          <h1>Consulta de factura IBAL</h1>
+          <p>Empresa Ibaguereña de Acueducto y Alcantarillado</p>
+        </div>
+      </div>
+    </header>
+
+    <form class="search" id="form" autocomplete="off">
+      <label for="matricula">Número de matrícula</label>
+      <div class="row">
+        <input id="matricula" name="matricula" type="text" inputmode="numeric" pattern="\d{3,12}" maxlength="12" placeholder="Escribe tu matrícula aquí..." required>
+        <button type="submit" id="btn">Consultar</button>
+      </div>
+      <p class="hint">La consulta puede tardar unos segundos. Se leen los mismos datos del portal de pagos IBAL.</p>
+    </form>
+
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <strong>Buscando...</strong>
+      <p>Consultando el portal de IBAL</p>
+    </div>
+
+    <div id="empty" class="empty">Ingresa una matrícula para ver fecha de suspensión, factura, titular y valor a pagar.</div>
+    <div id="message" class="message hidden"></div>
+
+    <section id="results" class="cards hidden" aria-live="polite">
+      <article class="card blue">
+        <div class="label">Fecha de suspensión</div>
+        <div class="value" id="fecha">—</div>
+        <div class="sub" id="periodo">Periodo de facturación —</div>
+        <svg class="icon" width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="16" rx="3" stroke="#4c9adf" stroke-width="1.7"/>
+          <path d="M8 3v4M16 3v4M3 10h18" stroke="#4c9adf" stroke-width="1.7" stroke-linecap="round"/>
+          <path d="M9 15l2 2 4-4" stroke="#4c9adf" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </article>
+
+      <article class="card teal">
+        <div class="label">Nº matrícula</div>
+        <div class="value" id="mat">—</div>
+        <div class="label" style="margin-top:14px">Número de factura</div>
+        <div class="value small" id="factura">—</div>
+      </article>
+
+      <article class="card blue">
+        <div class="label">Nombre del titular</div>
+        <div class="value small" id="nombre">—</div>
+        <div class="label" style="margin-top:14px">Dirección del titular</div>
+        <div class="sub" id="direccion" style="margin-top:6px">—</div>
+      </article>
+
+      <article class="card navy">
+        <div class="label">Pago total</div>
+        <div class="value total" id="pago">—</div>
+        <div class="status unpaid" id="estado">—</div>
+      </article>
+    </section>
+
+    <footer>
+      Datos tomados del portal público de pagos IBAL.
+      <a href="/docs">API</a> ·
+      <a href="https://ibal.gov.co/pagos/" target="_blank" rel="noopener">ibal.gov.co/pagos</a>
+    </footer>
+  </div>
+
+  <script>
+    const form = document.getElementById("form");
+    const input = document.getElementById("matricula");
+    const btn = document.getElementById("btn");
+    const loading = document.getElementById("loading");
+    const empty = document.getElementById("empty");
+    const message = document.getElementById("message");
+    const results = document.getElementById("results");
+
+    input.addEventListener("input", () => {
+      input.value = input.value.replace(/\D/g, "");
+    });
+
+    function show(el) { el.classList.remove("hidden"); }
+    function hide(el) { el.classList.add("hidden"); }
+
+    function setText(id, value, fallback) {
+      document.getElementById(id).textContent = value || fallback || "—";
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const matricula = input.value.trim();
+      if (!/^\d{3,12}$/.test(matricula)) {
+        hide(results);
+        hide(empty);
+        hide(loading);
+        message.className = "message error";
+        message.textContent = "La matrícula debe tener solo dígitos (3 a 12).";
+        show(message);
+        return;
+      }
+
+      hide(empty);
+      hide(message);
+      hide(results);
+      show(loading);
+      btn.disabled = true;
+      btn.textContent = "Consultando...";
+
+      try {
+        const response = await fetch("/api/v1/facturas/" + encodeURIComponent(matricula));
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          const detalle = data.detail;
+          const texto = Array.isArray(detalle)
+            ? detalle.map((item) => item.msg || item).join(" ")
+            : (detalle || "No se pudo consultar IBAL.");
+          throw new Error(texto);
+        }
+
+        if (!data.encontrada) {
+          message.className = "message ok";
+          message.textContent = data.mensaje || "No hay facturas pendientes para esa matrícula.";
+          show(message);
+          return;
+        }
+
+        const f = data.factura || {};
+        setText("fecha", f.fecha_suspension);
+        setText("periodo", f.periodo_facturacion ? "Periodo de facturación " + f.periodo_facturacion : "Periodo de facturación —");
+        setText("mat", f.matricula || data.matricula_consultada);
+        setText("factura", f.numero_factura);
+        setText("nombre", f.nombre_titular);
+        setText("direccion", f.direccion_titular);
+        setText("pago", f.pago_total_formato || (f.pago_total != null ? "$" + Number(f.pago_total).toLocaleString("es-CO") : "—"));
+
+        const estado = document.getElementById("estado");
+        estado.textContent = f.estado_pago || "—";
+        estado.className = "status " + (f.pagada ? "paid" : "unpaid");
+
+        show(results);
+      } catch (error) {
+        message.className = "message error";
+        message.textContent = error.message || "Error de conexión con la API.";
+        show(message);
+      } finally {
+        hide(loading);
+        btn.disabled = false;
+        btn.textContent = "Consultar";
+      }
+    });
+  </script>
+</body>
+</html>
