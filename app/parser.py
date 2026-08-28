@@ -321,8 +321,9 @@ def describe_empty_html(html: str) -> str:
         return "IBAL rechazó el reCAPTCHA. Espera unos segundos e intenta de nuevo."
     if is_landing_page(html) or "Bienvenido al sistema de pagos" in text:
         return (
-            "IBAL no procesó la consulta y devolvió la página de inicio. "
-            "El reCAPTCHA del portal no validó. Espera 15 segundos y vuelve a consultar."
+            "IBAL no procesó la consulta: reCAPTCHA no validó desde este servidor. "
+            "Espera 1–2 minutos e intenta una sola vez. Si persiste, la IP de Railway "
+            "puede estar bloqueada (prueba más tarde o usa caché de matrículas ya consultadas)."
         )
     if pagina_aun_cargando(html):
         return (

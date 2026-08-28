@@ -27,6 +27,14 @@ Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 window.chrome = { runtime: {} };
 Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es', 'en']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+  parameters.name === 'notifications'
+    ? Promise.resolve({ state: Notification.permission })
+    : originalQuery(parameters)
+);
 """
 
 
@@ -222,7 +230,7 @@ async def _recaptcha_token(page, site_key: str) -> str:
             throw new Error("reCAPTCHA no cargó en el portal IBAL");
           }
           await new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error("grecaptcha.ready timeout")), 20000);
+            const timer = setTimeout(() => reject(new Error("grecaptcha.ready timeout")), 45000);
             window.grecaptcha.ready(() => {
               clearTimeout(timer);
               resolve();
@@ -235,6 +243,115 @@ async def _recaptcha_token(page, site_key: str) -> str:
     if not token or not isinstance(token, str):
         raise ConsultaError("IBAL no emitió token de reCAPTCHA. Reintenta en unos segundos.")
     return token
+
+
+async def _simular_usuario(page) -> None:
+    await page.mouse.move(220, 180, steps=12)
+    await page.hover("#form_consulta_desktop")
+    await page.mouse.move(480, 320, steps=10)
+    await page.wait_for_timeout(settings.ibal_recaptcha_warmup_ms)
+
+
+async def _cargar_portal(page) -> None:
+    await page.goto(settings.ibal_base_url, wait_until="load", timeout=60000)
+    try:
+        await page.wait_for_selector("#form_consulta_desktop", timeout=45000)
+    except Exception as exc:
+        html = await page.content()
+        bloqueo = ibal_block_message(html)
+        if bloqueo:
+            if _current_proxy_url:
+                mark_proxy_blocked(_current_proxy_url)
+            else:
+                _marcar_limite_ibal()
+            raise ConsultaError(bloqueo, status_code=429) from exc
+        antibot = detect_antibot_page(html)
+        raise ConsultaError(
+            antibot or f"No se pudo cargar el formulario IBAL: {exc}",
+            status_code=502,
+        ) from exc
+    await page.wait_for_function(
+        "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
+        timeout=45000,
+    )
+    await _simular_usuario(page)
+
+
+async def _inyectar_token(page, token: str) -> None:
+    await page.evaluate(
+        """(token) => {
+          const form = document.getElementById('form_consulta_desktop');
+          if (!form) throw new Error("form_consulta_desktop no encontrado");
+          let field = form.querySelector('[name="g-recaptcha-response"]');
+          if (!field) {
+            field = document.createElement('textarea');
+            field.name = 'g-recaptcha-response';
+            field.style.display = 'none';
+            form.appendChild(field);
+          }
+          field.value = token;
+        }""",
+        token,
+    )
+
+
+async def _esperar_resultado_ibal(page) -> None:
+    try:
+        await page.wait_for_function(
+            """() => {
+              const text = document.body?.innerText || '';
+              if (/No se encue?ntran facturas/i.test(text)) return true;
+              if (/L[ií]mite de consultas/i.test(text)) return true;
+              if (/\\d{1,2}\\/\\d{1,2}\\/\\d{4}/.test(text) && /PAGO\\s+TOTAL/i.test(text)) {
+                return /\\$\\s*[\\d.,]+/.test(text) || /NO PAGADA|PAGADA/i.test(text);
+              }
+              if (/Bienvenido al sistema de pagos/i.test(text) && /form_consulta_desktop/.test(document.body?.innerHTML || '')) {
+                return true;
+              }
+              return false;
+            }""",
+            timeout=90000,
+        )
+    except Exception as exc:
+        logger.warning("Timeout esperando tarjetas IBAL: %s", exc)
+
+
+async def _enviar_consulta_token(page, matricula: str, token: str) -> str:
+    await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
+    await _inyectar_token(page, token)
+    try:
+        async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
+            await page.evaluate(
+                "document.getElementById('form_consulta_desktop').requestSubmit()"
+            )
+    except Exception as exc:
+        logger.warning("requestSubmit no navegó (%s); probando POST con token", exc)
+        return await _post_con_token(page, matricula, token)
+    await _esperar_resultado_ibal(page)
+    return await page.content()
+
+
+async def _intentar_consulta_token(page, matricula: str, intento: int) -> str:
+    if intento > 0:
+        logger.info("Reintento reCAPTCHA IBAL #%s", intento + 1)
+        await page.goto(settings.ibal_base_url, wait_until="load", timeout=60000)
+        await page.wait_for_selector("#form_consulta_desktop", timeout=45000)
+        await page.wait_for_function(
+            "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
+            timeout=45000,
+        )
+        await _simular_usuario(page)
+    else:
+        await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
+        await page.wait_for_timeout(1500)
+
+    await page.wait_for_timeout(1000 + intento * 2500)
+    token = await _recaptcha_token(page, settings.recaptcha_site_key)
+    html = await _enviar_consulta_token(page, matricula, token)
+    if pagina_aun_cargando(html):
+        await page.wait_for_timeout(6000)
+        html = await page.content()
+    return html
 
 
 async def _post_con_token(page, matricula: str, token: str) -> str:
@@ -290,77 +407,18 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     await context.add_init_script(STEALTH_JS)
     page = await context.new_page()
     try:
-        await page.goto(settings.ibal_base_url, wait_until="domcontentloaded", timeout=60000)
-        try:
-            await page.wait_for_selector("#form_consulta_desktop", timeout=45000)
-        except Exception as exc:
-            html = await page.content()
-            bloqueo = ibal_block_message(html)
-            if bloqueo:
-                if _current_proxy_url:
-                    mark_proxy_blocked(_current_proxy_url)
-                else:
-                    _marcar_limite_ibal()
-                raise ConsultaError(bloqueo, status_code=429) from exc
-            antibot = detect_antibot_page(html)
-            raise ConsultaError(
-                antibot or f"No se pudo cargar el formulario IBAL: {exc}",
-                status_code=502,
-            ) from exc
-        await page.wait_for_function(
-            "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
-            timeout=30000,
-        )
-        await page.mouse.move(180, 160, steps=8)
-        await page.hover("#form_consulta_desktop")
-        await page.wait_for_timeout(3500)
-
-        await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
-        await page.evaluate(
-            """() => {
-              const btn = document.getElementById('busca_desktop');
-              if (btn) btn.setAttribute('type', 'button');
-            }"""
-        )
-
-        try:
-            async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
-                await page.click("#busca_desktop")
-        except Exception as exc:
-            logger.warning("La navegación tras el clic no se completó: %s", exc)
-
-        try:
-            await page.wait_for_function(
-                """() => {
-                  const text = document.body?.innerText || '';
-                  if (/No se encue?ntran facturas/i.test(text)) return true;
-                  if (/L[ií]mite de consultas/i.test(text)) return true;
-                  if (/\\d{1,2}\\/\\d{1,2}\\/\\d{4}/.test(text) && /PAGO\\s+TOTAL/i.test(text)) {
-                    return /\\$\\s*[\\d.,]+/.test(text) || /NO PAGADA|PAGADA/i.test(text);
-                  }
-                  return false;
-                }""",
-                timeout=90000,
-            )
-        except Exception as exc:
-            logger.warning("Timeout esperando tarjetas IBAL: %s", exc)
-
-        html = await page.content()
-        if pagina_aun_cargando(html):
-            await page.wait_for_timeout(5000)
-            html = await page.content()
-        parsed = _build_response(matricula, html, "browser")
-        if parsed:
-            return parsed
-
-        if settings.ibal_retry_on_landing and is_landing_page(html):
-            logger.warning("IBAL volvió al inicio; reintentando POST con token de reCAPTCHA")
-            await page.wait_for_timeout(2000)
-            token = await _recaptcha_token(page, settings.recaptcha_site_key)
-            html = await _post_con_token(page, matricula, token)
+        await _cargar_portal(page)
+        html = ""
+        max_intentos = max(1, settings.ibal_recaptcha_retries)
+        for intento in range(max_intentos):
+            html = await _intentar_consulta_token(page, matricula, intento)
             parsed = _build_response(matricula, html, "browser")
             if parsed:
                 return parsed
+            if not is_landing_page(html) and not pagina_aun_cargando(html):
+                break
+            if intento + 1 < max_intentos:
+                await page.wait_for_timeout(8000)
 
         return _empty_consulta(matricula, html, "browser")
     except ConsultaError:
