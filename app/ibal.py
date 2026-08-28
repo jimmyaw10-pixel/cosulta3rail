@@ -252,6 +252,65 @@ async def _cargar_portal(page) -> None:
     await _simular_usuario(page)
 
 
+def _html_tiene_resultado(html: str) -> bool:
+    if ibal_block_message(html):
+        return False
+    factura, sin = parse_factura_html(html)
+    return factura is not None or sin is not None
+
+
+async def _extraer_recaptcha_action(page) -> str:
+    action = await page.evaluate(
+        """() => {
+          const html = document.documentElement.innerHTML;
+          const m = html.match(
+            /grecaptcha\\.execute\\([^,]+,\\s*\\{[^}]*action\\s*:\\s*['"]([^'"]+)['"]/i
+          );
+          return m ? m[1] : null;
+        }"""
+    )
+    if action:
+        logger.info("pageAction detectada en IBAL: %s", action)
+        return str(action)
+    return settings.recaptcha_action
+
+
+async def _enganchar_token_recaptcha(page, token: str) -> None:
+    await page.evaluate(
+        """(token) => {
+          const apply = (gr) => {
+            if (!gr) return;
+            gr.execute = async () => token;
+            if (gr.enterprise) gr.enterprise.execute = async () => token;
+          };
+          apply(window.grecaptcha);
+          const started = Date.now();
+          const timer = setInterval(() => {
+            apply(window.grecaptcha);
+            if (Date.now() - started > 8000) clearInterval(timer);
+          }, 150);
+        }""",
+        token,
+    )
+
+
+async def _enviar_con_clic_portal(page, matricula: str, token: str) -> str:
+    await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
+    await _inyectar_token(page, token)
+    await _enganchar_token_recaptcha(page, token)
+    await page.wait_for_timeout(500)
+    try:
+        async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
+            await page.click("#busca_desktop")
+    except Exception as exc:
+        logger.warning("Clic en busca_desktop sin navegación completa: %s", exc)
+    await _esperar_resultado_ibal(page)
+    html = await page.content()
+    if _html_tiene_resultado(html):
+        return html
+    return await _post_con_token(page, matricula, token)
+
+
 async def _inyectar_token(page, token: str) -> None:
     await page.evaluate(
         """(token) => {
@@ -289,10 +348,10 @@ async def _esperar_resultado_ibal(page) -> None:
 
 
 async def _enviar_consulta_token(page, matricula: str, token: str, origen: str) -> str:
-    await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
     if origen in {"capsolver", "2captcha"}:
-        return await _post_con_token(page, matricula, token)
+        return await _enviar_con_clic_portal(page, matricula, token)
 
+    await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
     await _inyectar_token(page, token)
     try:
         async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
@@ -307,11 +366,21 @@ async def _enviar_consulta_token(page, matricula: str, token: str, origen: str) 
 
 
 async def _obtener_token(page, intento: int) -> tuple[str, str]:
+    action = await _extraer_recaptcha_action(page)
     proveedor = _resolver_proveedor(intento)
     if proveedor:
-        logger.info("Resolviendo reCAPTCHA v3 con %s (intento %s)", proveedor, intento + 1)
+        logger.info(
+            "Resolviendo reCAPTCHA v3 con %s (intento %s, action=%s)",
+            proveedor,
+            intento + 1,
+            action,
+        )
         try:
-            token = await solve_recaptcha_v3(proveedor)
+            token = await solve_recaptcha_v3(
+                proveedor,
+                action=action,
+                user_agent=USER_AGENT,
+            )
             return token, proveedor
         except CaptchaSolverError as exc:
             modo = (settings.captcha_solver or "").strip().lower()
@@ -343,18 +412,6 @@ async def _intentar_consulta_token(page, matricula: str, intento: int) -> str:
     await page.wait_for_timeout(800 + intento * 1500)
     token, origen = await _obtener_token(page, intento)
     logger.info("Token reCAPTCHA obtenido vía %s (%s chars)", origen, len(token))
-
-    if origen in {"capsolver", "2captcha"}:
-        for sub in range(3):
-            if sub > 0:
-                logger.info("Nuevo token %s (subintento %s)", origen, sub + 1)
-                token = await solve_recaptcha_v3(origen)
-            html = await _post_con_token(page, matricula, token)
-            if not is_landing_page(html) and not pagina_aun_cargando(html):
-                return html
-            await page.wait_for_timeout(3000)
-        return html
-
     html = await _enviar_consulta_token(page, matricula, token, origen)
     if pagina_aun_cargando(html):
         await page.wait_for_timeout(6000)
@@ -423,6 +480,8 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
             parsed = _build_response(matricula, html, "browser")
             if parsed:
                 return parsed
+            if _html_tiene_resultado(html):
+                break
             if not is_landing_page(html) and not pagina_aun_cargando(html):
                 break
             if intento + 1 < max_intentos:

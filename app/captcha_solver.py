@@ -29,7 +29,11 @@ def _resolver_proveedor(intento: int) -> Optional[str]:
 
 def _task_types() -> list[str]:
     primary = (settings.captcha_task_type or "ReCaptchaV3M1TaskProxyLess").strip()
-    fallbacks = ["ReCaptchaV3M1TaskProxyLess", "ReCaptchaV3TaskProxyLess"]
+    fallbacks = [
+        "ReCaptchaV3M1TaskProxyLess",
+        "ReCaptchaV3TaskProxyLess",
+        "ReCaptchaV3EnterpriseTaskProxyLess",
+    ]
     ordered = [primary] + [t for t in fallbacks if t != primary]
     return ordered
 
@@ -130,14 +134,17 @@ async def _solve_capsolver_once(
     action: str,
     min_score: float,
     task_type: str,
+    user_agent: Optional[str] = None,
 ) -> str:
-    task = {
+    task: dict = {
         "type": task_type,
         "websiteURL": page_url,
         "websiteKey": site_key,
         "pageAction": action,
         "minScore": min_score,
     }
+    if user_agent:
+        task["userAgent"] = user_agent
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
         create = await client.post(
             "https://api.capsolver.com/createTask",
@@ -164,13 +171,14 @@ async def _solve_capsolver(
     site_key: str,
     action: str,
     min_score: float,
+    user_agent: Optional[str] = None,
 ) -> str:
     errors: list[str] = []
     for task_type in _task_types():
         for score in _min_scores(0):
             try:
                 return await _solve_capsolver_once(
-                    page_url, site_key, action, score, task_type
+                    page_url, site_key, action, score, task_type, user_agent
                 )
             except CaptchaSolverError as exc:
                 errors.append(f"{task_type}@{score}: {exc}")
@@ -184,6 +192,7 @@ async def solve_recaptcha_v3(
     site_key: Optional[str] = None,
     action: Optional[str] = None,
     min_score: Optional[float] = None,
+    user_agent: Optional[str] = None,
 ) -> str:
     page_url = page_url or settings.ibal_base_url
     site_key = site_key or settings.recaptcha_site_key
@@ -193,5 +202,5 @@ async def solve_recaptcha_v3(
     if provider == "2captcha":
         return await _solve_2captcha(page_url, site_key, action, min_score)
     if provider == "capsolver":
-        return await _solve_capsolver(page_url, site_key, action, min_score)
+        return await _solve_capsolver(page_url, site_key, action, min_score, user_agent)
     raise CaptchaSolverError(f"Proveedor de captcha desconocido: {provider}")
