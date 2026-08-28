@@ -267,7 +267,7 @@
         <input id="matricula" name="matricula" type="text" inputmode="numeric" pattern="\d{3,12}" maxlength="12" placeholder="Escribe tu matrícula aquí..." required>
         <button type="submit" id="btn">Consultar</button>
       </div>
-      <p class="hint">La consulta puede tardar hasta 3 minutos. No cierres ni recargues la página mientras busca.</p>
+      <p class="hint">Hasta 100 consultas/hora de las mismas matrículas salen de caché (24 h). IBAL solo se consulta en vivo un cupo limitado al día para no bloquear la IP.</p>
     </form>
 
     <div id="loading" class="loading hidden">
@@ -383,7 +383,8 @@
 
         if (!data.encontrada) {
           message.className = "message ok";
-          message.textContent = data.mensaje || "No hay facturas pendientes para esa matrícula.";
+          message.textContent = (data.mensaje || "No hay facturas pendientes para esa matrícula.")
+            + (data.desde_cache ? " (caché)" : "");
           show(message);
           return;
         }
@@ -407,6 +408,8 @@
         const texto = String(error.message || "");
         if (error.name === "TimeoutError" || texto.includes("Timeout") || texto.includes("aborted")) {
           message.textContent = "La consulta tardó más de 3 minutos. Espera un momento y vuelve a intentar.";
+        } else if (texto.toLowerCase().includes("límite de consultas") || texto.toLowerCase().includes("exceso de consultas")) {
+          message.textContent = "IBAL bloqueó las consultas por un rato. Espera 10 a 15 minutos y prueba una sola vez.";
         } else {
           message.textContent = texto || "Error de conexión con la API.";
         }

@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import re
+import time
 from typing import Optional
 
 import httpx
@@ -7,7 +9,8 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import ConsultaResponse
-from app.parser import compact_text, describe_empty_html, is_landing_page, parse_factura_html
+from app.parser import compact_text, describe_empty_html, ibal_block_message, is_landing_page, parse_factura_html
+from app.proxy import mark_proxy_blocked, next_proxy, proxies_enabled
 
 logger = logging.getLogger("ibal")
 
@@ -39,6 +42,10 @@ MATRICULA_RE = re.compile(r"^\d{3,12}$")
 
 _playwright = None
 _browser = None
+_ibal_lock = asyncio.Lock()
+_last_ibal_hit = 0.0
+_ibal_blocked_until = 0.0
+_current_proxy_url: Optional[str] = None
 
 
 class ConsultaError(Exception):
@@ -55,6 +62,35 @@ def validar_matricula(matricula: str) -> str:
             status_code=400,
         )
     return value
+
+
+def _marcar_limite_ibal() -> None:
+    global _ibal_blocked_until
+    _ibal_blocked_until = time.time() + settings.ibal_limit_cooldown_seconds
+    logger.warning("IBAL en cooldown hasta %s", int(_ibal_blocked_until))
+
+
+async def _esperar_cupo_ibal() -> None:
+    global _last_ibal_hit
+    if proxies_enabled():
+        async with _ibal_lock:
+            espera = settings.ibal_min_interval_seconds - (time.time() - _last_ibal_hit)
+            if espera > 0:
+                await asyncio.sleep(espera)
+            _last_ibal_hit = time.time()
+        return
+    ahora = time.time()
+    if ahora < _ibal_blocked_until:
+        minutos = max(1, int((_ibal_blocked_until - ahora) / 60) + 1)
+        raise ConsultaError(
+            f"IBAL sigue en pausa por límite de consultas. Espera unos {minutos} minuto(s) y prueba una sola vez.",
+            status_code=429,
+        )
+    async with _ibal_lock:
+        espera = settings.ibal_min_interval_seconds - (time.time() - _last_ibal_hit)
+        if espera > 0:
+            await asyncio.sleep(espera)
+        _last_ibal_hit = time.time()
 
 
 def _headers() -> dict[str, str]:
@@ -80,6 +116,13 @@ def _build_response(
     html: str,
     motor: str,
 ) -> Optional[ConsultaResponse]:
+    bloqueo = ibal_block_message(html)
+    if bloqueo:
+        if _current_proxy_url:
+            mark_proxy_blocked(_current_proxy_url)
+        else:
+            _marcar_limite_ibal()
+        raise ConsultaError(bloqueo, status_code=429)
     factura, sin_resultados = parse_factura_html(html)
     if sin_resultados:
         return ConsultaResponse(
@@ -208,18 +251,35 @@ async def _post_con_token(page, matricula: str, token: str) -> str:
 
 
 async def consultar_browser(matricula: str) -> ConsultaResponse:
+    global _current_proxy_url
     if _browser is None:
         await start_browser()
 
-    context = await _browser.new_context(
-        user_agent=USER_AGENT,
-        locale="es-CO",
-        timezone_id="America/Bogota",
-        geolocation={"latitude": 4.4389, "longitude": -75.2322},
-        permissions=["geolocation"],
-        viewport={"width": 1366, "height": 900},
-        extra_http_headers={"Accept-Language": "es-CO,es;q=0.9"},
-    )
+    proxy_cfg = None
+    _current_proxy_url = None
+    picked = next_proxy()
+    if picked:
+        proxy_cfg, _current_proxy_url = picked
+    elif proxies_enabled():
+        raise ConsultaError(
+            "Todos los proxies están en pausa por límite IBAL. Espera unos minutos o agrega más IPs al pool.",
+            status_code=429,
+        )
+    context_kwargs: dict = {
+        "user_agent": USER_AGENT,
+        "locale": "es-CO",
+        "timezone_id": "America/Bogota",
+        "geolocation": {"latitude": 4.4389, "longitude": -75.2322},
+        "permissions": ["geolocation"],
+        "viewport": {"width": 1366, "height": 900},
+        "extra_http_headers": {"Accept-Language": "es-CO,es;q=0.9"},
+    }
+    if proxy_cfg:
+        context_kwargs["proxy"] = proxy_cfg
+        _current_proxy_url = proxy_cfg.get("server", "")
+        logger.info("Consulta IBAL vía proxy %s", _current_proxy_url)
+
+    context = await _browser.new_context(**context_kwargs)
     await context.add_init_script(STEALTH_JS)
     page = await context.new_page()
     try:
@@ -252,7 +312,7 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
         if parsed:
             return parsed
 
-        if is_landing_page(html):
+        if settings.ibal_retry_on_landing and is_landing_page(html):
             logger.warning("IBAL volvió al inicio; reintentando POST con token de reCAPTCHA")
             await page.wait_for_timeout(2000)
             token = await _recaptcha_token(page, settings.recaptcha_site_key)
@@ -272,6 +332,10 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
 
 async def consultar_factura(matricula: str) -> ConsultaResponse:
     matricula = validar_matricula(matricula)
+    await _esperar_cupo_ibal()
+    from app.store import register_live_hit
+
+    register_live_hit()
     engine = (settings.ibal_engine or "auto").strip().lower()
 
     if engine == "http":

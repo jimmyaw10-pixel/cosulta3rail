@@ -30,6 +30,8 @@ class ConsultaResponse(BaseModel):
     debug_texto: Optional[str] = Field(
         None, description="Texto visible de IBAL cuando no se pudo leer la factura"
     )
+    desde_cache: bool = Field(False, description="true si no se consultó IBAL en esta petición")
+    cache_stale: bool = Field(False, description="true si el dato de caché ya pasó el TTL fresco")
 
 
 class ErrorResponse(BaseModel):

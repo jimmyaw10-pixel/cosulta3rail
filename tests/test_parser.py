@@ -71,9 +71,16 @@ def test_sin_facturas():
     assert msg is not None
 
 
+def test_limite_consultas():
+    html = "<html><body>Límite de consultas alcanzado.</body></html>"
+    from app.parser import ibal_block_message
+    assert ibal_block_message(html)
+
+
 if __name__ == "__main__":
     test_parse_money()
     test_parse_cards()
     test_fecha_vencimiento()
     test_sin_facturas()
+    test_limite_consultas()
     print("parser ok")

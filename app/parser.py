@@ -24,6 +24,13 @@ SIN_FACTURA = re.compile(
     r"sin facturas pendientes",
     re.I,
 )
+LIMITE_CONSULTAS = re.compile(
+    r"L[ií]mite de consultas alcanzado|"
+    r"l[ií]mite de consultas|"
+    r"demasiadas consultas|"
+    r"too many requests",
+    re.I,
+)
 
 LABEL_SET = [
     LABEL_FECHA,
@@ -117,6 +124,8 @@ def _search(text: str, pattern: str) -> Optional[str]:
 def parse_factura_html(html: str) -> tuple[Optional[Factura], Optional[str]]:
     """Devuelve (factura, mensaje_sin_resultados)."""
     text = _visible_text(html)
+    if LIMITE_CONSULTAS.search(text):
+        return None, None
     if SIN_FACTURA.search(text):
         return None, "No se encuentran facturas pendientes por pagar para la matrícula"
 
@@ -195,6 +204,17 @@ def parse_factura_html(html: str) -> tuple[Optional[Factura], Optional[str]]:
     )
 
 
+def ibal_block_message(html: str) -> Optional[str]:
+    text = _visible_text(html)
+    if LIMITE_CONSULTAS.search(text):
+        return (
+            "IBAL bloqueó la IP por exceso de consultas. "
+            "Espera 10 a 15 minutos y vuelve a intentar una sola vez. "
+            "Consultar en bucle alarga el bloqueo."
+        )
+    return None
+
+
 def compact_text(html: str, limit: int = 400) -> str:
     return " ".join(_visible_text(html).split())[:limit]
 
@@ -209,6 +229,9 @@ def is_landing_page(html: str) -> bool:
 
 
 def describe_empty_html(html: str) -> str:
+    bloqueo = ibal_block_message(html)
+    if bloqueo:
+        return bloqueo
     text = _visible_text(html)
     lower = text.lower()
     if "the action you requested is not allowed" in lower:

@@ -101,7 +101,12 @@ curl -H "X-API-Key: tu-clave" "https://TU-SERVICIO.up.railway.app/api/v1/factura
 | `IBAL_ENGINE` | `browser` (en Docker) | `browser`, `http` o `auto` |
 | `IBAL_TIMEOUT_SECONDS` | `180` | Tiempo máximo de consulta (3 minutos) |
 | `API_KEY` | vacío | Si se define, exige header `X-API-Key` |
-| `CACHE_TTL_SECONDS` | `300` | Caché en segundos (`0` desactiva) |
+| `CACHE_TTL_SECONDS` | `86400` (24 h) | Caché fresca por matrícula |
+| `CACHE_STALE_SECONDS` | `604800` (7 días) | Si IBAL está bloqueado, se sirve este dato viejo |
+| `IBAL_MIN_INTERVAL_SECONDS` | `20` | Pausa entre consultas en vivo |
+| `IBAL_MAX_LIVE_PER_HOUR` | `40` | Tope de hits reales a IBAL por hora |
+| `IBAL_MAX_LIVE_PER_DAY` | `80` | Tope de hits reales a IBAL por día |
+| `IBAL_LIMIT_COOLDOWN_SECONDS` | `900` | Pausa si IBAL responde límite de consultas |
 | `CORS_ORIGINS` | `*` | Orígenes permitidos, separados por coma |
 | `PORT` | lo asigna Railway | No hace falta configurarlo |
 

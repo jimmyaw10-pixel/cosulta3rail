@@ -17,7 +17,17 @@ class Settings(BaseSettings):
     api_key: str = ""
     cors_origins: str = "*"
 
-    cache_ttl_seconds: int = 300
+    cache_ttl_seconds: int = 86400
+    cache_stale_seconds: int = 604800
+    ibal_min_interval_seconds: float = 20.0
+    ibal_limit_cooldown_seconds: float = 900.0
+    ibal_retry_on_landing: bool = False
+    ibal_max_live_per_hour: int = 40
+    ibal_max_live_per_day: int = 80
+
+    # Proxies (opcional). Lista separada por comas: http://user:pass@host:port
+    proxy_list: str = ""
+    proxy_rotate: bool = True
 
     recaptcha_site_key: str = "6Le9s5gtAAAAAKi_ut-2vFVRS4m2hqNh8ftm5Omv"
 
