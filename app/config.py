@@ -17,15 +17,9 @@ class Settings(BaseSettings):
     api_key: str = ""
     cors_origins: str = "*"
 
-    cache_ttl_seconds: int = 86400
-    cache_stale_seconds: int = 604800
-    ibal_min_interval_seconds: float = 20.0
-    ibal_limit_cooldown_seconds: float = 900.0
     ibal_retry_on_landing: bool = True
     ibal_recaptcha_retries: int = 3
     ibal_recaptcha_warmup_ms: int = 6000
-    ibal_max_live_per_hour: int = 40
-    ibal_max_live_per_day: int = 80
 
     # Proxies (opcional). Lista separada por comas: http://user:pass@host:port
     proxy_list: str = ""
@@ -38,7 +32,8 @@ class Settings(BaseSettings):
     captcha_solver: str = "off"
     captcha_api_key: str = ""
     captcha_fallback: str = "capsolver"
-    captcha_min_score: float = 0.7
+    captcha_min_score: float = 0.9
+    captcha_task_type: str = "ReCaptchaV3M1TaskProxyLess"
 
 
 settings = Settings()

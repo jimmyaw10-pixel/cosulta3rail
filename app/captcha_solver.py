@@ -27,6 +27,25 @@ def _resolver_proveedor(intento: int) -> Optional[str]:
     return None
 
 
+def _task_types() -> list[str]:
+    primary = (settings.captcha_task_type or "ReCaptchaV3M1TaskProxyLess").strip()
+    fallbacks = ["ReCaptchaV3M1TaskProxyLess", "ReCaptchaV3TaskProxyLess"]
+    ordered = [primary] + [t for t in fallbacks if t != primary]
+    return ordered
+
+
+def _min_scores(intento: int) -> list[float]:
+    base = settings.captcha_min_score
+    scores = [base, 0.7, 0.5]
+    unique: list[float] = []
+    for s in scores:
+        if s not in unique:
+            unique.append(s)
+    if intento > 0 and 0.9 not in unique:
+        unique.insert(0, 0.9)
+    return unique
+
+
 async def _poll_2captcha(client: httpx.AsyncClient, task_id: str) -> str:
     for _ in range(40):
         await asyncio.sleep(5)
@@ -76,12 +95,12 @@ async def _solve_2captcha(
         if payload.get("status") != 1:
             raise CaptchaSolverError(f"2captcha create: {payload.get('request', payload)}")
         task_id = str(payload["request"])
-        logger.info("2captcha tarea %s creada", task_id)
+        logger.info("2captcha tarea %s creada (score %.1f)", task_id, min_score)
         return await _poll_2captcha(client, task_id)
 
 
 async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
-    for _ in range(40):
+    for _ in range(45):
         await asyncio.sleep(3)
         res = await client.post(
             "https://api.capsolver.com/getTaskResult",
@@ -93,8 +112,11 @@ async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
             raise CaptchaSolverError(f"CapSolver: {data.get('errorDescription', data)}")
         status = data.get("status")
         if status == "ready":
-            token = (data.get("solution") or {}).get("gRecaptchaResponse")
+            solution = data.get("solution") or {}
+            token = solution.get("gRecaptchaResponse")
             if token:
+                score = solution.get("score")
+                logger.info("CapSolver token listo (score reportado: %s)", score)
                 return str(token)
             break
         if status == "failed":
@@ -102,25 +124,24 @@ async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
     raise CaptchaSolverError("CapSolver no devolvió token a tiempo")
 
 
-async def _solve_capsolver(
+async def _solve_capsolver_once(
     page_url: str,
     site_key: str,
     action: str,
     min_score: float,
+    task_type: str,
 ) -> str:
+    task = {
+        "type": task_type,
+        "websiteURL": page_url,
+        "websiteKey": site_key,
+        "pageAction": action,
+        "minScore": min_score,
+    }
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
         create = await client.post(
             "https://api.capsolver.com/createTask",
-            json={
-                "clientKey": settings.captcha_api_key,
-                "task": {
-                    "type": "ReCaptchaV3TaskProxyLess",
-                    "websiteURL": page_url,
-                    "websiteKey": site_key,
-                    "pageAction": action,
-                    "minScore": min_score,
-                },
-            },
+            json={"clientKey": settings.captcha_api_key, "task": task},
         )
         create.raise_for_status()
         data = create.json()
@@ -129,8 +150,32 @@ async def _solve_capsolver(
         task_id = data.get("taskId")
         if not task_id:
             raise CaptchaSolverError(f"CapSolver sin taskId: {data}")
-        logger.info("CapSolver tarea %s creada", task_id)
+        logger.info(
+            "CapSolver tarea %s (%s, score %.1f)",
+            task_id,
+            task_type,
+            min_score,
+        )
         return await _poll_capsolver(client, task_id)
+
+
+async def _solve_capsolver(
+    page_url: str,
+    site_key: str,
+    action: str,
+    min_score: float,
+) -> str:
+    errors: list[str] = []
+    for task_type in _task_types():
+        for score in _min_scores(0):
+            try:
+                return await _solve_capsolver_once(
+                    page_url, site_key, action, score, task_type
+                )
+            except CaptchaSolverError as exc:
+                errors.append(f"{task_type}@{score}: {exc}")
+                logger.warning("CapSolver %s score %.1f falló: %s", task_type, score, exc)
+    raise CaptchaSolverError("; ".join(errors[-4:]) or "CapSolver no pudo generar token")
 
 
 async def solve_recaptcha_v3(

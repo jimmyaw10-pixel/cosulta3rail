@@ -324,8 +324,8 @@ def describe_empty_html(html: str) -> str:
 
         if solver_disponible():
             return (
-                "IBAL no procesó la consulta: reCAPTCHA no validó. "
-                "El solver está activo; reintenta en 1–2 minutos."
+                "IBAL no procesó la consulta: reCAPTCHA no validó incluso con CapSolver. "
+                "Verifica saldo en capsolver.com, CAPTCHA_MIN_SCORE=0.9 y redeploy."
             )
         return (
             "IBAL no procesó la consulta: reCAPTCHA no validó desde Railway. "

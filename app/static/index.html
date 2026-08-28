@@ -267,7 +267,7 @@
         <input id="matricula" name="matricula" type="text" inputmode="numeric" pattern="\d{3,12}" maxlength="12" placeholder="Escribe tu matrícula aquí..." required>
         <button type="submit" id="btn">Consultar</button>
       </div>
-      <p class="hint">Hasta 100 consultas/hora de las mismas matrículas salen de caché (24 h). IBAL solo se consulta en vivo un cupo limitado al día para no bloquear la IP.</p>
+      <p class="hint">Cada consulta va en vivo al portal IBAL (puede tardar 1–3 min con CapSolver).</p>
     </form>
 
     <div id="loading" class="loading hidden">
@@ -383,16 +383,14 @@
 
         if (!data.encontrada) {
           message.className = "message ok";
-          message.textContent = (data.mensaje || "No hay facturas pendientes para esa matrícula.")
-            + (data.desde_cache ? " (caché)" : "");
+          message.textContent = (data.mensaje || "No hay facturas pendientes para esa matrícula.");
           show(message);
           return;
         }
 
         if (!data.factura) {
           message.className = "message error";
-          message.textContent = (data.mensaje || "IBAL no devolvió la factura.")
-            + (data.desde_cache ? " (caché)" : "");
+          message.textContent = (data.mensaje || "IBAL no devolvió la factura.");
           show(message);
           return;
         }

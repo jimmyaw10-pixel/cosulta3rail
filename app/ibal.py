@@ -1,7 +1,5 @@
-import asyncio
 import logging
 import re
-import time
 from typing import Optional
 
 import httpx
@@ -59,9 +57,6 @@ MATRICULA_RE = re.compile(r"^\d{3,12}$")
 
 _playwright = None
 _browser = None
-_ibal_lock = asyncio.Lock()
-_last_ibal_hit = 0.0
-_ibal_blocked_until = 0.0
 _current_proxy_url: Optional[str] = None
 
 
@@ -82,32 +77,11 @@ def validar_matricula(matricula: str) -> str:
 
 
 def _marcar_limite_ibal() -> None:
-    global _ibal_blocked_until
-    _ibal_blocked_until = time.time() + settings.ibal_limit_cooldown_seconds
-    logger.warning("IBAL en cooldown hasta %s", int(_ibal_blocked_until))
+    logger.warning("IBAL respondió límite de consultas en esta petición")
 
 
 async def _esperar_cupo_ibal() -> None:
-    global _last_ibal_hit
-    if proxies_enabled():
-        async with _ibal_lock:
-            espera = settings.ibal_min_interval_seconds - (time.time() - _last_ibal_hit)
-            if espera > 0:
-                await asyncio.sleep(espera)
-            _last_ibal_hit = time.time()
-        return
-    ahora = time.time()
-    if ahora < _ibal_blocked_until:
-        minutos = max(1, int((_ibal_blocked_until - ahora) / 60) + 1)
-        raise ConsultaError(
-            f"IBAL sigue en pausa por límite de consultas. Espera unos {minutos} minuto(s) y prueba una sola vez.",
-            status_code=429,
-        )
-    async with _ibal_lock:
-        espera = settings.ibal_min_interval_seconds - (time.time() - _last_ibal_hit)
-        if espera > 0:
-            await asyncio.sleep(espera)
-        _last_ibal_hit = time.time()
+    return
 
 
 def _headers() -> dict[str, str]:
@@ -306,9 +280,6 @@ async def _esperar_resultado_ibal(page) -> None:
               if (/\\d{1,2}\\/\\d{1,2}\\/\\d{4}/.test(text) && /PAGO\\s+TOTAL/i.test(text)) {
                 return /\\$\\s*[\\d.,]+/.test(text) || /NO PAGADA|PAGADA/i.test(text);
               }
-              if (/Bienvenido al sistema de pagos/i.test(text) && /form_consulta_desktop/.test(document.body?.innerHTML || '')) {
-                return true;
-              }
               return false;
             }""",
             timeout=90000,
@@ -317,8 +288,11 @@ async def _esperar_resultado_ibal(page) -> None:
         logger.warning("Timeout esperando tarjetas IBAL: %s", exc)
 
 
-async def _enviar_consulta_token(page, matricula: str, token: str) -> str:
+async def _enviar_consulta_token(page, matricula: str, token: str, origen: str) -> str:
     await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
+    if origen in {"capsolver", "2captcha"}:
+        return await _post_con_token(page, matricula, token)
+
     await _inyectar_token(page, token)
     try:
         async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
@@ -366,10 +340,22 @@ async def _intentar_consulta_token(page, matricula: str, intento: int) -> str:
         await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
         await page.wait_for_timeout(1500)
 
-    await page.wait_for_timeout(1000 + intento * 2500)
+    await page.wait_for_timeout(800 + intento * 1500)
     token, origen = await _obtener_token(page, intento)
-    logger.info("Token reCAPTCHA obtenido vía %s", origen)
-    html = await _enviar_consulta_token(page, matricula, token)
+    logger.info("Token reCAPTCHA obtenido vía %s (%s chars)", origen, len(token))
+
+    if origen in {"capsolver", "2captcha"}:
+        for sub in range(3):
+            if sub > 0:
+                logger.info("Nuevo token %s (subintento %s)", origen, sub + 1)
+                token = await solve_recaptcha_v3(origen)
+            html = await _post_con_token(page, matricula, token)
+            if not is_landing_page(html) and not pagina_aun_cargando(html):
+                return html
+            await page.wait_for_timeout(3000)
+        return html
+
+    html = await _enviar_consulta_token(page, matricula, token, origen)
     if pagina_aun_cargando(html):
         await page.wait_for_timeout(6000)
         html = await page.content()
@@ -454,9 +440,6 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
 async def consultar_factura(matricula: str) -> ConsultaResponse:
     matricula = validar_matricula(matricula)
     await _esperar_cupo_ibal()
-    from app.store import register_live_hit
-
-    register_live_hit()
     engine = (settings.ibal_engine or "auto").strip().lower()
 
     if engine == "http":
