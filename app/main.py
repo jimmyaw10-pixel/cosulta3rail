@@ -3,9 +3,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel, Field
@@ -61,6 +61,21 @@ app.add_middleware(
 
 STATIC_DIR = FilePath(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, str):
+        error = detail
+    elif isinstance(detail, list):
+        error = "; ".join(str(item) for item in detail)
+    else:
+        error = str(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"ok": False, "error": error},
+    )
 
 
 def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):

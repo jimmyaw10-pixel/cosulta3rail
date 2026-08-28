@@ -215,6 +215,38 @@ def ibal_block_message(html: str) -> Optional[str]:
     return None
 
 
+def detect_antibot_page(html: str) -> Optional[str]:
+    """Detecta páginas de challenge/WAF cuando no cargó el formulario de consulta."""
+    if "form_consulta_desktop" in html or "busca_desktop" in html:
+        return None
+    text = _visible_text(html)
+    lower = text.lower()
+    html_lower = html.lower()
+    if "cloudflare" in html_lower or "checking your browser" in lower:
+        return (
+            "La red devolvió un challenge anti-bot (Cloudflare/WAF), no la página de pagos IBAL. "
+            "Un proxy rotativo no lo garantiza; proxies de datacenter suelen empeorarlo."
+        )
+    if "access denied" in lower or "forbidden" in lower or "403 forbidden" in lower:
+        return "IBAL o la red bloqueó el acceso (403). Prueba sin proxy o con IP residencial Colombia."
+    if "just a moment" in lower or "verifique que usted es un humano" in lower:
+        return (
+            "IBAL mostró un challenge anti-bot antes del formulario. "
+            "Es distinto al límite de consultas; hace falta IP limpia (residencial) o esperar."
+        )
+    if "proxy" in lower and any(w in lower for w in ("error", "failed", "connect", "tunnel")):
+        return "El proxy configurado falló o devolvió una página de error. Revisa PROXY_LIST."
+    if "captcha" in lower and "recaptcha" not in html_lower:
+        return "Apareció un captcha/challenge antes del formulario IBAL. Proxy rotativo no lo resuelve solo."
+    compact = " ".join(text.split())[:120]
+    if compact:
+        return (
+            "No se encontró el formulario IBAL (¿challenge anti-bot?). "
+            f"Página recibida: {compact}"
+        )
+    return "No se encontró el formulario IBAL (¿challenge anti-bot?)."
+
+
 def compact_text(html: str, limit: int = 400) -> str:
     return " ".join(_visible_text(html).split())[:limit]
 

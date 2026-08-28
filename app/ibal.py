@@ -9,7 +9,14 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import ConsultaResponse
-from app.parser import compact_text, describe_empty_html, ibal_block_message, is_landing_page, parse_factura_html
+from app.parser import (
+    compact_text,
+    describe_empty_html,
+    detect_antibot_page,
+    ibal_block_message,
+    is_landing_page,
+    parse_factura_html,
+)
 from app.proxy import mark_proxy_blocked, next_proxy, proxies_enabled
 
 logger = logging.getLogger("ibal")
@@ -276,15 +283,29 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     }
     if proxy_cfg:
         context_kwargs["proxy"] = proxy_cfg
-        _current_proxy_url = proxy_cfg.get("server", "")
         logger.info("Consulta IBAL vía proxy %s", _current_proxy_url)
 
     context = await _browser.new_context(**context_kwargs)
     await context.add_init_script(STEALTH_JS)
     page = await context.new_page()
     try:
-        await page.goto(settings.ibal_base_url, wait_until="domcontentloaded")
-        await page.wait_for_selector("#form_consulta_desktop", timeout=30000)
+        await page.goto(settings.ibal_base_url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            await page.wait_for_selector("#form_consulta_desktop", timeout=45000)
+        except Exception as exc:
+            html = await page.content()
+            bloqueo = ibal_block_message(html)
+            if bloqueo:
+                if _current_proxy_url:
+                    mark_proxy_blocked(_current_proxy_url)
+                else:
+                    _marcar_limite_ibal()
+                raise ConsultaError(bloqueo, status_code=429) from exc
+            antibot = detect_antibot_page(html)
+            raise ConsultaError(
+                antibot or f"No se pudo cargar el formulario IBAL: {exc}",
+                status_code=502,
+            ) from exc
         await page.wait_for_function(
             "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
             timeout=30000,
