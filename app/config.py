@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     cache_stale_seconds: int = 604800
     ibal_min_interval_seconds: float = 20.0
     ibal_limit_cooldown_seconds: float = 900.0
-    ibal_retry_on_landing: bool = False
+    ibal_retry_on_landing: bool = True
     ibal_max_live_per_hour: int = 40
     ibal_max_live_per_day: int = 80
 

@@ -389,7 +389,24 @@
           return;
         }
 
-        const f = data.factura || {};
+        if (!data.factura) {
+          message.className = "message error";
+          message.textContent = (data.mensaje || "IBAL no devolvió la factura.")
+            + (data.desde_cache ? " (caché)" : "");
+          show(message);
+          return;
+        }
+
+        const f = data.factura;
+        const fechaValida = /^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$/.test(String(f.fecha_suspension || ""));
+        const tieneMonto = f.pago_total != null || (f.pago_total_formato && /\d/.test(f.pago_total_formato));
+        const tieneFactura = f.numero_factura && /\d/.test(String(f.numero_factura));
+        if (!fechaValida || (!tieneMonto && !tieneFactura)) {
+          message.className = "message error";
+          message.textContent = data.mensaje || "IBAL respondió incompleto. Espera unos segundos e intenta de nuevo.";
+          show(message);
+          return;
+        }
         setText("fecha", f.fecha_suspension);
         setText("periodo", f.periodo_facturacion ? "Periodo de facturación " + f.periodo_facturacion : "Periodo de facturación —");
         setText("mat", f.matricula || data.matricula_consultada);

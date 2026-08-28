@@ -15,6 +15,7 @@ from app.parser import (
     detect_antibot_page,
     ibal_block_message,
     is_landing_page,
+    pagina_aun_cargando,
     parse_factura_html,
 )
 from app.proxy import mark_proxy_blocked, next_proxy, proxies_enabled
@@ -328,7 +329,26 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
         except Exception as exc:
             logger.warning("La navegación tras el clic no se completó: %s", exc)
 
+        try:
+            await page.wait_for_function(
+                """() => {
+                  const text = document.body?.innerText || '';
+                  if (/No se encue?ntran facturas/i.test(text)) return true;
+                  if (/L[ií]mite de consultas/i.test(text)) return true;
+                  if (/\\d{1,2}\\/\\d{1,2}\\/\\d{4}/.test(text) && /PAGO\\s+TOTAL/i.test(text)) {
+                    return /\\$\\s*[\\d.,]+/.test(text) || /NO PAGADA|PAGADA/i.test(text);
+                  }
+                  return false;
+                }""",
+                timeout=90000,
+            )
+        except Exception as exc:
+            logger.warning("Timeout esperando tarjetas IBAL: %s", exc)
+
         html = await page.content()
+        if pagina_aun_cargando(html):
+            await page.wait_for_timeout(5000)
+            html = await page.content()
         parsed = _build_response(matricula, html, "browser")
         if parsed:
             return parsed

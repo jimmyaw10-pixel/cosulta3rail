@@ -31,6 +31,14 @@ LIMITE_CONSULTAS = re.compile(
     r"too many requests",
     re.I,
 )
+FECHA_VALOR = re.compile(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$")
+FECHA_EN_TEXTO = re.compile(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
+CARGANDO = re.compile(
+    r"^Buscando\.{0,3}$|"
+    r"Leaflet|OpenStreetMap|Presiona en el mapa|"
+    r"Tambi[eé]n puedes pagar tu factura en nuestras oficinas",
+    re.I,
+)
 
 LABEL_SET = [
     LABEL_FECHA,
@@ -114,6 +122,43 @@ def _estado_pago(text: str) -> Optional[str]:
     return None
 
 
+def _normalize_fecha(raw: Optional[str]) -> Optional[str]:
+    if not raw or CARGANDO.search(raw):
+        return None
+    value = " ".join(raw.split())
+    if FECHA_VALOR.match(value):
+        return value
+    match = FECHA_EN_TEXTO.search(value)
+    if match:
+        return match.group(0)
+    return None
+
+
+def factura_es_completa(factura: Factura) -> bool:
+    if not factura.fecha_suspension or not FECHA_VALOR.match(factura.fecha_suspension):
+        return False
+    if not factura.pago_total and not factura.numero_factura:
+        return False
+    if factura.nombre_titular and CARGANDO.search(factura.nombre_titular):
+        return False
+    return True
+
+
+def pagina_aun_cargando(html: str) -> bool:
+    text = _visible_text(html)
+    if SIN_FACTURA.search(text) or LIMITE_CONSULTAS.search(text):
+        return False
+    if FECHA_EN_TEXTO.search(text) and LABEL_PAGO.search(text):
+        lower = text.lower()
+        if re.search(r"\$\s*[\d.,]+", text) or re.search(r"no pagada|pagada", lower):
+            return False
+    if re.search(r"^Buscando\.{0,3}$", text, re.M):
+        return True
+    if "Bienvenido al sistema de pagos" in text and not FECHA_EN_TEXTO.search(text):
+        return True
+    return False
+
+
 def _search(text: str, pattern: str) -> Optional[str]:
     match = re.search(pattern, text, re.I | re.S)
     if not match:
@@ -131,9 +176,12 @@ def parse_factura_html(html: str) -> tuple[Optional[Factura], Optional[str]]:
 
     soup = BeautifulSoup(html, "lxml")
 
-    fecha = _value_after_label(soup, LABEL_FECHA) or _search(
-        text,
-        r"FECHA\s+DE\s+(?:SUSPENSI[OÓ]N|VENCIMIENTO|CORTE)\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+    fecha = _normalize_fecha(
+        _value_after_label(soup, LABEL_FECHA)
+        or _search(
+            text,
+            r"FECHA\s+DE\s+(?:SUSPENSI[OÓ]N|VENCIMIENTO|CORTE)\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        )
     )
     periodo_raw = _value_after_label(soup, LABEL_PERIODO)
     periodo = None
@@ -187,21 +235,22 @@ def parse_factura_html(html: str) -> tuple[Optional[Factura], Optional[str]]:
     if estado:
         pagada = estado.upper() in {"PAGADA", "PAGO EXITOSO", "PAGADO"}
 
-    return (
-        Factura(
-            fecha_suspension=fecha,
-            periodo_facturacion=periodo,
-            matricula=matricula,
-            numero_factura=numero,
-            nombre_titular=nombre,
-            direccion_titular=direccion,
-            pago_total=pago_total,
-            pago_total_formato=pago_fmt,
-            estado_pago=estado,
-            pagada=pagada,
-        ),
-        None,
+    factura = Factura(
+        fecha_suspension=fecha,
+        periodo_facturacion=periodo,
+        matricula=matricula,
+        numero_factura=numero,
+        nombre_titular=nombre,
+        direccion_titular=direccion,
+        pago_total=pago_total,
+        pago_total_formato=pago_fmt,
+        estado_pago=estado,
+        pagada=pagada,
     )
+    if not factura_es_completa(factura):
+        return None, None
+
+    return (factura, None)
 
 
 def ibal_block_message(html: str) -> Optional[str]:
@@ -274,6 +323,11 @@ def describe_empty_html(html: str) -> str:
         return (
             "IBAL no procesó la consulta y devolvió la página de inicio. "
             "El reCAPTCHA del portal no validó. Espera 15 segundos y vuelve a consultar."
+        )
+    if pagina_aun_cargando(html):
+        return (
+            "IBAL aún estaba cargando la factura (Buscando...). "
+            "Reintenta en unos segundos; el portal no terminó de responder."
         )
     if "form_consulta_desktop" in html or "busca_desktop" in html:
         return (

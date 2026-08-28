@@ -71,6 +71,22 @@ def test_sin_facturas():
     assert msg is not None
 
 
+def test_rechaza_pagina_cargando():
+    html = """
+    <html><body>
+      <div>FECHA DE SUSPENSIÓN</div><div>Buscando...</div>
+      <div>Nº MATRÍCULA</div><div>155369</div>
+      <div>Bienvenido al sistema de pagos del IBAL</div>
+      <div>También puedes pagar tu factura en nuestras oficinas CAP</div>
+    </body></html>
+    """
+    factura, msg = parse_factura_html(html)
+    assert factura is None
+    assert msg is None
+    from app.parser import pagina_aun_cargando
+    assert pagina_aun_cargando(html) is True
+
+
 def test_limite_consultas():
     html = "<html><body>Límite de consultas alcanzado.</body></html>"
     from app.parser import ibal_block_message
@@ -82,5 +98,6 @@ if __name__ == "__main__":
     test_parse_cards()
     test_fecha_vencimiento()
     test_sin_facturas()
+    test_rechaza_pagina_cargando()
     test_limite_consultas()
     print("parser ok")
