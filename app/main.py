@@ -117,6 +117,8 @@ async def health():
         "ibal_vivo_hora": hour,
         "tope_dia": settings.ibal_max_live_per_day,
         "tope_hora": settings.ibal_max_live_per_hour,
+        "captcha_solver": settings.captcha_solver,
+        "captcha_configurado": bool(settings.captcha_api_key and settings.captcha_solver not in {"", "off", "browser"}),
     }
 
 

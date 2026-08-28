@@ -18,6 +18,7 @@ from app.parser import (
     pagina_aun_cargando,
     parse_factura_html,
 )
+from app.captcha_solver import CaptchaSolverError, _resolver_proveedor, solve_recaptcha_v3
 from app.proxy import mark_proxy_blocked, next_proxy, proxies_enabled
 
 logger = logging.getLogger("ibal")
@@ -331,6 +332,26 @@ async def _enviar_consulta_token(page, matricula: str, token: str) -> str:
     return await page.content()
 
 
+async def _obtener_token(page, intento: int) -> tuple[str, str]:
+    proveedor = _resolver_proveedor(intento)
+    if proveedor:
+        logger.info("Resolviendo reCAPTCHA v3 con %s (intento %s)", proveedor, intento + 1)
+        try:
+            token = await solve_recaptcha_v3(proveedor)
+            return token, proveedor
+        except CaptchaSolverError as exc:
+            modo = (settings.captcha_solver or "").strip().lower()
+            if modo in {"2captcha", "capsolver"}:
+                raise ConsultaError(
+                    f"No se pudo resolver reCAPTCHA ({proveedor}): {exc}",
+                    status_code=502,
+                ) from exc
+            logger.warning("Solver %s falló, probando navegador: %s", proveedor, exc)
+
+    token = await _recaptcha_token(page, settings.recaptcha_site_key)
+    return token, "browser"
+
+
 async def _intentar_consulta_token(page, matricula: str, intento: int) -> str:
     if intento > 0:
         logger.info("Reintento reCAPTCHA IBAL #%s", intento + 1)
@@ -346,7 +367,8 @@ async def _intentar_consulta_token(page, matricula: str, intento: int) -> str:
         await page.wait_for_timeout(1500)
 
     await page.wait_for_timeout(1000 + intento * 2500)
-    token = await _recaptcha_token(page, settings.recaptcha_site_key)
+    token, origen = await _obtener_token(page, intento)
+    logger.info("Token reCAPTCHA obtenido vía %s", origen)
     html = await _enviar_consulta_token(page, matricula, token)
     if pagina_aun_cargando(html):
         await page.wait_for_timeout(6000)

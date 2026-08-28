@@ -320,10 +320,17 @@ def describe_empty_html(html: str) -> str:
     if "captcha" in lower and any(w in lower for w in ("inválid", "invalid", "error", "fall")):
         return "IBAL rechazó el reCAPTCHA. Espera unos segundos e intenta de nuevo."
     if is_landing_page(html) or "Bienvenido al sistema de pagos" in text:
+        from app.captcha_solver import solver_disponible
+
+        if solver_disponible():
+            return (
+                "IBAL no procesó la consulta: reCAPTCHA no validó. "
+                "El solver está activo; reintenta en 1–2 minutos."
+            )
         return (
-            "IBAL no procesó la consulta: reCAPTCHA no validó desde este servidor. "
-            "Espera 1–2 minutos e intenta una sola vez. Si persiste, la IP de Railway "
-            "puede estar bloqueada (prueba más tarde o usa caché de matrículas ya consultadas)."
+            "IBAL no procesó la consulta: reCAPTCHA no validó desde Railway. "
+            "Configura CAPTCHA_SOLVER=capsolver (o 2captcha) y CAPTCHA_API_KEY en Railway "
+            "para obtener tokens con score alto. Sin eso, la IP del servidor suele ser rechazada."
         )
     if pagina_aun_cargando(html):
         return (

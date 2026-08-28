@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     proxy_rotate: bool = True
 
     recaptcha_site_key: str = "6Le9s5gtAAAAAKi_ut-2vFVRS4m2hqNh8ftm5Omv"
+    recaptcha_action: str = "consulta_pago"
+
+    # off | browser | 2captcha | capsolver | auto (browser luego solver en reintentos)
+    captcha_solver: str = "off"
+    captcha_api_key: str = ""
+    captcha_fallback: str = "capsolver"
+    captcha_min_score: float = 0.7
 
 
 settings = Settings()
