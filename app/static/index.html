@@ -366,17 +366,20 @@
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-          const detalle = data.detail;
           let texto = "No se pudo consultar IBAL.";
-          if (typeof detalle === "string") texto = detalle;
-          else if (Array.isArray(detalle)) texto = detalle.map((item) => item.msg || item).join(" ");
-          else if (detalle && typeof detalle === "object") texto = detalle.error || detalle.mensaje || texto;
+          if (typeof data.error === "string" && data.error) texto = data.error;
+          else if (typeof data.detail === "string") texto = data.detail;
+          else if (Array.isArray(data.detail)) texto = data.detail.map((item) => item.msg || item).join(" ");
+          else if (data.detail && typeof data.detail === "object") texto = data.detail.error || data.detail.mensaje || texto;
+          else if (typeof data.mensaje === "string" && data.mensaje) texto = data.mensaje;
           throw new Error(texto);
         }
 
         if (data.ok === false) {
           message.className = "message error";
-          message.textContent = data.mensaje || data.error || "IBAL no devolvió la factura.";
+          let texto = data.mensaje || data.error || "IBAL no devolvió la factura.";
+          if (data.debug_texto) texto += " Detalle: " + String(data.debug_texto).slice(0, 180);
+          message.textContent = texto;
           show(message);
           return;
         }
