@@ -267,13 +267,13 @@
         <input id="matricula" name="matricula" type="text" inputmode="numeric" pattern="\d{3,12}" maxlength="12" placeholder="Escribe tu matrícula aquí..." required>
         <button type="submit" id="btn">Consultar</button>
       </div>
-      <p class="hint">La consulta puede tardar unos segundos. Se leen los mismos datos del portal de pagos IBAL.</p>
+      <p class="hint">La consulta puede tardar hasta 3 minutos. No cierres ni recargues la página mientras busca.</p>
     </form>
 
     <div id="loading" class="loading hidden">
       <div class="spinner"></div>
       <strong>Buscando...</strong>
-      <p>Consultando el portal de IBAL</p>
+      <p>Consultando el portal de IBAL. Esto puede tardar hasta 3 minutos.</p>
     </div>
 
     <div id="empty" class="empty">Ingresa una matrícula para ver fecha de suspensión, factura, titular y valor a pagar.</div>
@@ -360,7 +360,9 @@
       btn.textContent = "Consultando...";
 
       try {
-        const response = await fetch("/api/v1/facturas/" + encodeURIComponent(matricula));
+        const response = await fetch("/api/v1/facturas/" + encodeURIComponent(matricula), {
+          signal: AbortSignal.timeout(180000)
+        });
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
@@ -394,7 +396,12 @@
         show(results);
       } catch (error) {
         message.className = "message error";
-        message.textContent = error.message || "Error de conexión con la API.";
+        const texto = String(error.message || "");
+        if (error.name === "TimeoutError" || texto.includes("Timeout") || texto.includes("aborted")) {
+          message.textContent = "La consulta tardó más de 3 minutos. Espera un momento y vuelve a intentar.";
+        } else {
+          message.textContent = texto || "Error de conexión con la API.";
+        }
         show(message);
       } finally {
         hide(loading);

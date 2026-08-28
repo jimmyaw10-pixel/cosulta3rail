@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import ConsultaResponse
-from app.parser import detect_block_reason, parse_factura_html
+from app.parser import describe_empty_html, parse_factura_html
 
 logger = logging.getLogger("ibal")
 
@@ -103,17 +103,10 @@ async def consultar_http(matricula: str) -> ConsultaResponse:
         }
         result = await client.post(settings.ibal_base_url, data=payload)
         result.raise_for_status()
-        html = result.text
-
-        parsed = _build_response(matricula, html, "http")
+        parsed = _build_response(matricula, result.text, "http")
         if parsed:
             return parsed
-
-        reason = detect_block_reason(html)
-        raise ConsultaError(
-            "IBAL no devolvió datos de factura por HTTP "
-            f"({reason or 'posible reCAPTCHA o sesión inválida'})."
-        )
+        raise ConsultaError(describe_empty_html(result.text))
 
 
 async def start_browser() -> None:
@@ -137,6 +130,7 @@ async def start_browser() -> None:
             "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
         ],
+        ignore_default_args=["--enable-automation"],
     )
     logger.info("Navegador Chromium iniciado")
 
@@ -151,6 +145,28 @@ async def stop_browser() -> None:
         _playwright = None
 
 
+async def _recaptcha_token(page, site_key: str) -> str:
+    token = await page.evaluate(
+        """async (siteKey) => {
+          if (!window.grecaptcha || !window.grecaptcha.execute) {
+            throw new Error("reCAPTCHA no cargó en el portal IBAL");
+          }
+          await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("grecaptcha.ready timeout")), 20000);
+            window.grecaptcha.ready(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+          return await window.grecaptcha.execute(siteKey, {action: "consulta_pago"});
+        }""",
+        site_key,
+    )
+    if not token or not isinstance(token, str):
+        raise ConsultaError("IBAL no emitió token de reCAPTCHA. Reintenta en unos segundos.")
+    return token
+
+
 async def consultar_browser(matricula: str) -> ConsultaResponse:
     if _browser is None:
         await start_browser()
@@ -158,7 +174,11 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     context = await _browser.new_context(
         user_agent=USER_AGENT,
         locale="es-CO",
-        viewport={"width": 1280, "height": 900},
+        timezone_id="America/Bogota",
+        geolocation={"latitude": 4.4389, "longitude": -75.2322},
+        permissions=["geolocation"],
+        viewport={"width": 1366, "height": 900},
+        extra_http_headers={"Accept-Language": "es-CO,es;q=0.9"},
     )
     await context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -166,48 +186,34 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     page = await context.new_page()
     try:
         await page.goto(settings.ibal_base_url, wait_until="domcontentloaded")
-        await page.wait_for_selector('input[name="matricula_cliente"]', timeout=20000)
+        await page.wait_for_selector("#form_consulta_desktop", timeout=30000)
         await page.wait_for_function(
             "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
-            timeout=20000,
+            timeout=30000,
+        )
+        await page.wait_for_timeout(800)
+
+        token = await _recaptcha_token(page, settings.recaptcha_site_key)
+        await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
+        await page.locator("#recaptcha_response_desktop").evaluate(
+            "(el, value) => { el.value = value; }",
+            token,
         )
 
-        desktop = page.locator("#form_consulta_desktop input[name='matricula_cliente']")
-        use_desktop = await desktop.count() and await desktop.first.is_visible()
-        if use_desktop:
-            await desktop.first.fill(matricula)
-            submit = page.locator("#busca_desktop")
-        else:
-            await page.locator(
-                "#form_consulta_mobile input[name='matricula_cliente']"
-            ).first.fill(matricula)
-            submit = page.locator("#busca_mobile")
-
-        async with page.expect_navigation(timeout=45000, wait_until="domcontentloaded"):
-            await submit.click()
-
-        try:
-            await page.wait_for_function(
-                """() => {
-                  const t = (document.body && document.body.innerText) || '';
-                  return t.includes('FECHA DE SUSPENSI') ||
-                         t.includes('NÚMERO DE FACTURA') ||
-                         t.includes('NUMERO DE FACTURA') ||
-                         t.includes('No se encuetran') ||
-                         t.includes('No se encuentran');
-                }""",
-                timeout=20000,
+        async with page.expect_navigation(timeout=120000, wait_until="domcontentloaded"):
+            await page.evaluate(
+                "document.getElementById('form_consulta_desktop').submit()"
             )
-        except Exception:
-            await page.wait_for_timeout(2000)
 
         html = await page.content()
         parsed = _build_response(matricula, html, "browser")
         if parsed:
             return parsed
-        raise ConsultaError(
-            "La consulta en el portal IBAL no devolvió una factura reconocible."
-        )
+        raise ConsultaError(describe_empty_html(html))
+    except ConsultaError:
+        raise
+    except Exception as exc:
+        raise ConsultaError(f"No se pudo consultar el portal IBAL: {exc}") from exc
     finally:
         await context.close()
 

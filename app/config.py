@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     # http | browser | auto
     ibal_engine: str = "auto"
     ibal_base_url: str = "https://ibal.gov.co/pagos/"
-    ibal_timeout_seconds: float = 45.0
+    ibal_timeout_seconds: float = 180.0
+    consulta_timeout_seconds: float = 180.0
 
     # Vacío = API pública. Si se define, hay que enviar X-API-Key.
     api_key: str = ""

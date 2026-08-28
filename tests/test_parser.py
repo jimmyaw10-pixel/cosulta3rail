@@ -51,6 +51,19 @@ def test_parse_cards():
     assert factura.pagada is False
 
 
+def test_fecha_vencimiento():
+    html = """
+    <div>FECHA DE VENCIMIENTO</div><div>10/09/2026</div>
+    <div>Nº MATRÍCULA</div><div>24714</div>
+    <div>PAGO TOTAL</div><div>$10.000</div>
+    """
+    factura, msg = parse_factura_html(html)
+    assert msg is None
+    assert factura is not None
+    assert factura.fecha_suspension == "10/09/2026"
+    assert factura.matricula == "24714"
+
+
 def test_sin_facturas():
     html = "<html><body>No se encuetran facturas pendientes por pagar para la matrícula</body></html>"
     factura, msg = parse_factura_html(html)
@@ -61,5 +74,6 @@ def test_sin_facturas():
 if __name__ == "__main__":
     test_parse_money()
     test_parse_cards()
+    test_fecha_vencimiento()
     test_sin_facturas()
     print("parser ok")

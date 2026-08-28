@@ -99,6 +99,7 @@ curl -H "X-API-Key: tu-clave" "https://TU-SERVICIO.up.railway.app/api/v1/factura
 | Variable | Default | Descripción |
 | --- | --- | --- |
 | `IBAL_ENGINE` | `browser` (en Docker) | `browser`, `http` o `auto` |
+| `IBAL_TIMEOUT_SECONDS` | `180` | Tiempo máximo de consulta (3 minutos) |
 | `API_KEY` | vacío | Si se define, exige header `X-API-Key` |
 | `CACHE_TTL_SECONDS` | `300` | Caché en segundos (`0` desactiva) |
 | `CORS_ORIGINS` | `*` | Orígenes permitidos, separados por coma |
