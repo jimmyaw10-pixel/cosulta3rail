@@ -367,10 +367,18 @@
 
         if (!response.ok) {
           const detalle = data.detail;
-          const texto = Array.isArray(detalle)
-            ? detalle.map((item) => item.msg || item).join(" ")
-            : (detalle || "No se pudo consultar IBAL.");
+          let texto = "No se pudo consultar IBAL.";
+          if (typeof detalle === "string") texto = detalle;
+          else if (Array.isArray(detalle)) texto = detalle.map((item) => item.msg || item).join(" ");
+          else if (detalle && typeof detalle === "object") texto = detalle.error || detalle.mensaje || texto;
           throw new Error(texto);
+        }
+
+        if (data.ok === false) {
+          message.className = "message error";
+          message.textContent = data.mensaje || data.error || "IBAL no devolvió la factura.";
+          show(message);
+          return;
         }
 
         if (!data.encontrada) {

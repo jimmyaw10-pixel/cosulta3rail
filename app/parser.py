@@ -195,6 +195,19 @@ def parse_factura_html(html: str) -> tuple[Optional[Factura], Optional[str]]:
     )
 
 
+def compact_text(html: str, limit: int = 400) -> str:
+    return " ".join(_visible_text(html).split())[:limit]
+
+
+def is_landing_page(html: str) -> bool:
+    text = _visible_text(html)
+    if SIN_FACTURA.search(text):
+        return False
+    if LABEL_FECHA.search(text) or LABEL_PAGO.search(text) or LABEL_FACTURA.search(text):
+        return False
+    return "Bienvenido al sistema de pagos" in text or "SISTEMA DE PAGOS IBAL" in text.upper()
+
+
 def describe_empty_html(html: str) -> str:
     text = _visible_text(html)
     lower = text.lower()
@@ -202,6 +215,11 @@ def describe_empty_html(html: str) -> str:
         return "IBAL rechazó la sesión CSRF. Reintenta la consulta."
     if "captcha" in lower and any(w in lower for w in ("inválid", "invalid", "error", "fall")):
         return "IBAL rechazó el reCAPTCHA. Espera unos segundos e intenta de nuevo."
+    if is_landing_page(html) or "Bienvenido al sistema de pagos" in text:
+        return (
+            "IBAL no procesó la consulta y devolvió la página de inicio. "
+            "El reCAPTCHA del portal no validó. Espera 15 segundos y vuelve a consultar."
+        )
     if "form_consulta_desktop" in html or "busca_desktop" in html:
         return (
             "IBAL devolvió el formulario de búsqueda sin tarjetas de factura. "

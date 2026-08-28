@@ -7,9 +7,28 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import ConsultaResponse
-from app.parser import describe_empty_html, parse_factura_html
+from app.parser import compact_text, describe_empty_html, is_landing_page, parse_factura_html
 
 logger = logging.getLogger("ibal")
+
+STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+window.chrome = { runtime: {} };
+Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+"""
+
+
+def _empty_consulta(matricula: str, html: str, motor: str) -> ConsultaResponse:
+    return ConsultaResponse(
+        ok=False,
+        matricula_consultada=matricula,
+        encontrada=False,
+        mensaje=describe_empty_html(html),
+        factura=None,
+        motor=motor,
+        debug_texto=compact_text(html),
+    )
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -106,7 +125,7 @@ async def consultar_http(matricula: str) -> ConsultaResponse:
         parsed = _build_response(matricula, result.text, "http")
         if parsed:
             return parsed
-        raise ConsultaError(describe_empty_html(result.text))
+        return _empty_consulta(matricula, result.text, "http")
 
 
 async def start_browser() -> None:
@@ -167,6 +186,27 @@ async def _recaptcha_token(page, site_key: str) -> str:
     return token
 
 
+async def _post_con_token(page, matricula: str, token: str) -> str:
+    csrf = await page.locator(
+        "#form_consulta_desktop input[name='csrf_test_name']"
+    ).input_value()
+    response = await page.request.post(
+        settings.ibal_base_url,
+        form={
+            "csrf_test_name": csrf or "",
+            "g-recaptcha-response": token,
+            "matricula_cliente": matricula,
+        },
+        headers={
+            "Origin": "https://ibal.gov.co",
+            "Referer": settings.ibal_base_url,
+        },
+        timeout=120000,
+        max_redirects=5,
+    )
+    return await response.text()
+
+
 async def consultar_browser(matricula: str) -> ConsultaResponse:
     if _browser is None:
         await start_browser()
@@ -180,9 +220,7 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
         viewport={"width": 1366, "height": 900},
         extra_http_headers={"Accept-Language": "es-CO,es;q=0.9"},
     )
-    await context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    await context.add_init_script(STEALTH_JS)
     page = await context.new_page()
     try:
         await page.goto(settings.ibal_base_url, wait_until="domcontentloaded")
@@ -191,25 +229,39 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
             "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
             timeout=30000,
         )
-        await page.wait_for_timeout(800)
+        await page.mouse.move(180, 160, steps=8)
+        await page.hover("#form_consulta_desktop")
+        await page.wait_for_timeout(3500)
 
-        token = await _recaptcha_token(page, settings.recaptcha_site_key)
         await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
-        await page.locator("#recaptcha_response_desktop").evaluate(
-            "(el, value) => { el.value = value; }",
-            token,
+        await page.evaluate(
+            """() => {
+              const btn = document.getElementById('busca_desktop');
+              if (btn) btn.setAttribute('type', 'button');
+            }"""
         )
 
-        async with page.expect_navigation(timeout=120000, wait_until="domcontentloaded"):
-            await page.evaluate(
-                "document.getElementById('form_consulta_desktop').submit()"
-            )
+        try:
+            async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
+                await page.click("#busca_desktop")
+        except Exception as exc:
+            logger.warning("La navegación tras el clic no se completó: %s", exc)
 
         html = await page.content()
         parsed = _build_response(matricula, html, "browser")
         if parsed:
             return parsed
-        raise ConsultaError(describe_empty_html(html))
+
+        if is_landing_page(html):
+            logger.warning("IBAL volvió al inicio; reintentando POST con token de reCAPTCHA")
+            await page.wait_for_timeout(2000)
+            token = await _recaptcha_token(page, settings.recaptcha_site_key)
+            html = await _post_con_token(page, matricula, token)
+            parsed = _build_response(matricula, html, "browser")
+            if parsed:
+                return parsed
+
+        return _empty_consulta(matricula, html, "browser")
     except ConsultaError:
         raise
     except Exception as exc:

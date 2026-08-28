@@ -27,6 +27,9 @@ class ConsultaResponse(BaseModel):
     mensaje: str
     factura: Optional[Factura] = None
     motor: str = Field(description="Motor usado: http o browser")
+    debug_texto: Optional[str] = Field(
+        None, description="Texto visible de IBAL cuando no se pudo leer la factura"
+    )
 
 
 class ErrorResponse(BaseModel):

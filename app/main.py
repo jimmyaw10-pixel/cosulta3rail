@@ -165,5 +165,6 @@ async def _consultar(matricula: str) -> ConsultaResponse:
             status_code=502,
             detail=f"No se pudo consultar el portal IBAL: {exc}",
         ) from exc
-    _store_cache(matricula, result)
+    if result.ok:
+        _store_cache(matricula, result)
     return result
