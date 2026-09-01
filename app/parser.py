@@ -31,6 +31,12 @@ LIMITE_CONSULTAS = re.compile(
     r"too many requests",
     re.I,
 )
+CF_CHALLENGE = re.compile(
+    r"checking your browser|cf-browser-verification|challenges\.cloudflare\.com|"
+    r"cf-chl-widget|just a moment|un momento|enable javascript and cookies|"
+    r"verifique que usted es un humano|attention required",
+    re.I,
+)
 FECHA_VALOR = re.compile(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$")
 FECHA_EN_TEXTO = re.compile(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
 CARGANDO = re.compile(
@@ -264,6 +270,14 @@ def ibal_block_message(html: str) -> Optional[str]:
     return None
 
 
+def es_challenge_cloudflare(html: str) -> bool:
+    if "form_consulta_desktop" in html or "busca_desktop" in html:
+        return False
+    text = _visible_text(html)
+    blob = f"{text}\n{html}"
+    return bool(CF_CHALLENGE.search(blob))
+
+
 def detect_antibot_page(html: str) -> Optional[str]:
     """Detecta páginas de challenge/WAF cuando no cargó el formulario de consulta."""
     if "form_consulta_desktop" in html or "busca_desktop" in html:
@@ -271,10 +285,11 @@ def detect_antibot_page(html: str) -> Optional[str]:
     text = _visible_text(html)
     lower = text.lower()
     html_lower = html.lower()
-    if "cloudflare" in html_lower or "checking your browser" in lower:
+    if es_challenge_cloudflare(html):
         return (
-            "La red devolvió un challenge anti-bot (Cloudflare/WAF), no la página de pagos IBAL. "
-            "Un proxy rotativo no lo garantiza; proxies de datacenter suelen empeorarlo."
+            "Cloudflare/WAF bloqueó la IP del servidor antes de cargar IBAL. "
+            "En Railway necesitas PROXY_LIST con proxy residencial de Colombia y "
+            "CAPTCHA_SOLVER=capsolver para obtener cf_clearance."
         )
     if "access denied" in lower or "forbidden" in lower or "403 forbidden" in lower:
         return "IBAL o la red bloqueó el acceso (403). Prueba sin proxy o con IP residencial Colombia."

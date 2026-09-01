@@ -103,9 +103,9 @@ async def _solve_2captcha(
         return await _poll_2captcha(client, task_id)
 
 
-async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
-    for _ in range(45):
-        await asyncio.sleep(3)
+async def _poll_capsolver_solution(client: httpx.AsyncClient, task_id: str) -> dict:
+    for _ in range(40):
+        await asyncio.sleep(2)
         res = await client.post(
             "https://api.capsolver.com/getTaskResult",
             json={"clientKey": settings.captcha_api_key, "taskId": task_id},
@@ -117,15 +117,52 @@ async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
         status = data.get("status")
         if status == "ready":
             solution = data.get("solution") or {}
-            token = solution.get("gRecaptchaResponse")
-            if token:
-                score = solution.get("score")
-                logger.info("CapSolver token listo (score reportado: %s)", score)
-                return str(token)
+            if solution:
+                return solution
             break
         if status == "failed":
             raise CaptchaSolverError(f"CapSolver falló: {data}")
-    raise CaptchaSolverError("CapSolver no devolvió token a tiempo")
+    raise CaptchaSolverError("CapSolver no devolvió solución a tiempo")
+
+
+async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
+    solution = await _poll_capsolver_solution(client, task_id)
+    token = solution.get("gRecaptchaResponse") or solution.get("token")
+    if token:
+        score = solution.get("score")
+        logger.info("CapSolver token listo (score reportado: %s)", score)
+        return str(token)
+    raise CaptchaSolverError("CapSolver no devolvió token reCAPTCHA")
+
+
+async def solve_cloudflare(proxy_url: str) -> dict:
+    from app.proxy import proxy_to_capsolver_format
+
+    proxy = proxy_to_capsolver_format(proxy_url)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+        create = await client.post(
+            "https://api.capsolver.com/createTask",
+            json={
+                "clientKey": settings.captcha_api_key,
+                "task": {
+                    "type": "AntiCloudflareTask",
+                    "websiteURL": settings.ibal_base_url,
+                    "proxy": proxy,
+                },
+            },
+        )
+        create.raise_for_status()
+        data = create.json()
+        if data.get("errorId"):
+            raise CaptchaSolverError(
+                f"CapSolver Cloudflare: {data.get('errorDescription', data)}"
+            )
+        task_id = data.get("taskId")
+        if not task_id:
+            raise CaptchaSolverError(f"CapSolver Cloudflare sin taskId: {data}")
+        logger.info("CapSolver Cloudflare tarea %s", task_id)
+        return await _poll_capsolver_solution(client, task_id)
+
 
 
 async def _solve_capsolver_once(
@@ -173,17 +210,21 @@ async def _solve_capsolver(
     min_score: float,
     user_agent: Optional[str] = None,
 ) -> str:
-    errors: list[str] = []
-    for task_type in _task_types():
-        for score in _min_scores(0):
-            try:
-                return await _solve_capsolver_once(
-                    page_url, site_key, action, score, task_type, user_agent
-                )
-            except CaptchaSolverError as exc:
-                errors.append(f"{task_type}@{score}: {exc}")
-                logger.warning("CapSolver %s score %.1f falló: %s", task_type, score, exc)
-    raise CaptchaSolverError("; ".join(errors[-4:]) or "CapSolver no pudo generar token")
+    primary = (settings.captcha_task_type or "ReCaptchaV3M1TaskProxyLess").strip()
+    try:
+        return await _solve_capsolver_once(
+            page_url, site_key, action, min_score, primary, user_agent
+        )
+    except CaptchaSolverError as exc:
+        logger.warning("CapSolver %s falló (%s); probando fallback", primary, exc)
+    fallback = (
+        "ReCaptchaV3TaskProxyLess"
+        if "M1" in primary
+        else "ReCaptchaV3M1TaskProxyLess"
+    )
+    return await _solve_capsolver_once(
+        page_url, site_key, action, 0.7, fallback, user_agent
+    )
 
 
 async def solve_recaptcha_v3(

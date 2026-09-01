@@ -273,7 +273,7 @@
     <div id="loading" class="loading hidden">
       <div class="spinner"></div>
       <strong>Buscando...</strong>
-      <p>Consultando el portal de IBAL. Esto puede tardar hasta 3 minutos.</p>
+      <p>Consultando CapSolver + portal IBAL. Puede tardar 2–5 minutos.</p>
     </div>
 
     <div id="empty" class="empty">Ingresa una matrícula para ver fecha de suspensión, factura, titular y valor a pagar.</div>
@@ -361,7 +361,7 @@
 
       try {
         const response = await fetch("/api/v1/facturas/" + encodeURIComponent(matricula), {
-          signal: AbortSignal.timeout(180000)
+          signal: AbortSignal.timeout(360000)
         });
         const data = await response.json().catch(() => ({}));
 
@@ -425,7 +425,7 @@
         message.className = "message error";
         const texto = String(error.message || "");
         if (error.name === "TimeoutError" || texto.includes("Timeout") || texto.includes("aborted")) {
-          message.textContent = "La consulta tardó más de 3 minutos. Espera un momento y vuelve a intentar.";
+          message.textContent = "La consulta tardó más de 5 minutos. Espera un momento y vuelve a intentar.";
         } else if (texto.toLowerCase().includes("límite de consultas") || texto.toLowerCase().includes("exceso de consultas")) {
           message.textContent = "IBAL bloqueó las consultas por un rato. Espera 10 a 15 minutos y prueba una sola vez.";
         } else {

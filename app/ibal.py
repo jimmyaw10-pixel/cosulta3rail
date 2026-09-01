@@ -16,7 +16,14 @@ from app.parser import (
     pagina_aun_cargando,
     parse_factura_html,
 )
-from app.captcha_solver import CaptchaSolverError, _resolver_proveedor, solve_recaptcha_v3
+from app.captcha_solver import (
+    CaptchaSolverError,
+    _resolver_proveedor,
+    solve_cloudflare,
+    solve_recaptcha_v3,
+    solver_disponible,
+)
+from app.parser import es_challenge_cloudflare
 from app.proxy import mark_proxy_blocked, next_proxy, proxies_enabled
 
 logger = logging.getLogger("ibal")
@@ -50,7 +57,7 @@ def _empty_consulta(matricula: str, html: str, motor: str) -> ConsultaResponse:
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 MATRICULA_RE = re.compile(r"^\d{3,12}$")
@@ -178,6 +185,7 @@ async def start_browser() -> None:
     _browser = await _playwright.chromium.launch(
         headless=True,
         args=[
+            "--headless=new",
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
@@ -227,24 +235,69 @@ async def _simular_usuario(page) -> None:
     await page.wait_for_timeout(settings.ibal_recaptcha_warmup_ms)
 
 
+async def _cookies_cloudflare(solution: dict) -> list[dict]:
+    out: list[dict] = []
+    for item in solution.get("cookies") or []:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        out.append(
+            {
+                "name": str(item["name"]),
+                "value": str(item.get("value", "")),
+                "domain": str(item.get("domain") or ".ibal.gov.co"),
+                "path": str(item.get("path") or "/"),
+            }
+        )
+    token = solution.get("token")
+    if token and not any(c["name"] == "cf_clearance" for c in out):
+        out.append(
+            {
+                "name": "cf_clearance",
+                "value": str(token),
+                "domain": ".ibal.gov.co",
+                "path": "/",
+            }
+        )
+    return out
+
+
 async def _cargar_portal(page) -> None:
-    await page.goto(settings.ibal_base_url, wait_until="load", timeout=60000)
-    try:
-        await page.wait_for_selector("#form_consulta_desktop", timeout=45000)
-    except Exception as exc:
-        html = await page.content()
-        bloqueo = ibal_block_message(html)
-        if bloqueo:
-            if _current_proxy_url:
-                mark_proxy_blocked(_current_proxy_url)
-            else:
-                _marcar_limite_ibal()
-            raise ConsultaError(bloqueo, status_code=429) from exc
-        antibot = detect_antibot_page(html)
-        raise ConsultaError(
-            antibot or f"No se pudo cargar el formulario IBAL: {exc}",
-            status_code=502,
-        ) from exc
+    ultimo_html = ""
+    for intento in range(3):
+        if intento > 0:
+            logger.info("Reintentando cargar IBAL (%s/3)", intento + 1)
+            await page.goto(settings.ibal_base_url, wait_until="load", timeout=60000)
+        else:
+            await page.goto(settings.ibal_base_url, wait_until="load", timeout=60000)
+
+        for _ in range(25):
+            if await page.locator("#form_consulta_desktop").count() > 0:
+                break
+            await page.wait_for_timeout(2000)
+        else:
+            ultimo_html = await page.content()
+            if intento < 2:
+                continue
+            bloqueo = ibal_block_message(ultimo_html)
+            if bloqueo:
+                if _current_proxy_url:
+                    mark_proxy_blocked(_current_proxy_url)
+                else:
+                    _marcar_limite_ibal()
+                raise ConsultaError(bloqueo, status_code=429)
+            antibot = detect_antibot_page(ultimo_html)
+            if es_challenge_cloudflare(ultimo_html) and not proxies_enabled():
+                raise ConsultaError(
+                    "Cloudflare bloquea la IP de Railway. Agrega PROXY_LIST con proxy "
+                    "residencial de Colombia (ej. CapSolver/DataImpulse) y redeploy.",
+                    status_code=502,
+                )
+            raise ConsultaError(
+                antibot or "No se pudo cargar el formulario IBAL tras varios intentos.",
+                status_code=502,
+            )
+        break
+
     await page.wait_for_function(
         "() => window.grecaptcha && typeof window.grecaptcha.execute === 'function'",
         timeout=45000,
@@ -300,7 +353,7 @@ async def _enviar_con_clic_portal(page, matricula: str, token: str) -> str:
     await _enganchar_token_recaptcha(page, token)
     await page.wait_for_timeout(500)
     try:
-        async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
+        async with page.expect_navigation(timeout=60000, wait_until="domcontentloaded"):
             await page.click("#busca_desktop")
     except Exception as exc:
         logger.warning("Clic en busca_desktop sin navegación completa: %s", exc)
@@ -341,7 +394,7 @@ async def _esperar_resultado_ibal(page) -> None:
               }
               return false;
             }""",
-            timeout=90000,
+            timeout=60000,
         )
     except Exception as exc:
         logger.warning("Timeout esperando tarjetas IBAL: %s", exc)
@@ -354,7 +407,7 @@ async def _enviar_consulta_token(page, matricula: str, token: str, origen: str) 
     await page.fill("#form_consulta_desktop input[name='matricula_cliente']", matricula)
     await _inyectar_token(page, token)
     try:
-        async with page.expect_navigation(timeout=90000, wait_until="domcontentloaded"):
+        async with page.expect_navigation(timeout=60000, wait_until="domcontentloaded"):
             await page.evaluate(
                 "document.getElementById('form_consulta_desktop').requestSubmit()"
             )
@@ -468,7 +521,27 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
         context_kwargs["proxy"] = proxy_cfg
         logger.info("Consulta IBAL vía proxy %s", _current_proxy_url)
 
+    user_agent = USER_AGENT
+    cf_cookies: list[dict] = []
+    if (
+        _current_proxy_url
+        and settings.ibal_cloudflare_bypass
+        and solver_disponible()
+        and (settings.captcha_solver or "").strip().lower() == "capsolver"
+    ):
+        try:
+            cf_solution = await solve_cloudflare(_current_proxy_url)
+            if cf_solution.get("userAgent"):
+                user_agent = str(cf_solution["userAgent"])
+            cf_cookies = await _cookies_cloudflare(cf_solution)
+            logger.info("Cloudflare cf_clearance obtenido (%s cookies)", len(cf_cookies))
+        except CaptchaSolverError as exc:
+            logger.warning("Bypass Cloudflare CapSolver falló: %s", exc)
+
+    context_kwargs["user_agent"] = user_agent
     context = await _browser.new_context(**context_kwargs)
+    if cf_cookies:
+        await context.add_cookies(cf_cookies)
     await context.add_init_script(STEALTH_JS)
     page = await context.new_page()
     try:
@@ -485,7 +558,7 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
             if not is_landing_page(html) and not pagina_aun_cargando(html):
                 break
             if intento + 1 < max_intentos:
-                await page.wait_for_timeout(8000)
+                await page.wait_for_timeout(4000)
 
         return _empty_consulta(matricula, html, "browser")
     except ConsultaError:

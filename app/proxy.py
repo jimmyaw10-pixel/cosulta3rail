@@ -31,6 +31,16 @@ def proxies_enabled() -> bool:
     return bool(_pool)
 
 
+def proxy_to_capsolver_format(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        raise ValueError(f"Proxy inválido: {url}")
+    port = parsed.port or (1080 if parsed.scheme == "socks5" else 8080)
+    user = parsed.username or ""
+    password = parsed.password or ""
+    return f"{parsed.hostname}:{port}:{user}:{password}"
+
+
 def parse_proxy(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
     if not parsed.hostname:
