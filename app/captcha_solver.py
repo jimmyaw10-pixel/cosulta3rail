@@ -68,10 +68,9 @@ def _build_capsolver_recaptcha_task(
         task["pageAction"] = action
     proxyless = "ProxyLess" in task_type
     if not proxyless and proxy_url:
-        from app.proxy import proxy_sticky_url, proxy_to_capsolver_format
+        from app.proxy import proxy_to_capsolver_format
 
-        sticky = proxy_sticky_url(proxy_url, "ibalcf")
-        task["proxy"] = proxy_to_capsolver_format(sticky)
+        task["proxy"] = proxy_to_capsolver_format(proxy_url, sticky_session="ibalcf")
     if user_agent and not proxyless:
         task["userAgent"] = user_agent
     return task
@@ -186,10 +185,9 @@ async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
 
 
 async def solve_cloudflare(proxy_url: str) -> dict:
-    from app.proxy import proxy_sticky_url, proxy_to_capsolver_format
+    from app.proxy import proxy_to_capsolver_format
 
-    sticky = proxy_sticky_url(proxy_url, "ibalcf")
-    proxy = proxy_to_capsolver_format(sticky)
+    proxy = proxy_to_capsolver_format(proxy_url, sticky_session="ibalcf")
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
         task_id = await _capsolver_create_task(
             client,

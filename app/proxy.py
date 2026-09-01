@@ -2,7 +2,9 @@ import logging
 import time
 from itertools import cycle
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote
+
+import httpx
 
 from app.config import settings
 
@@ -31,42 +33,97 @@ def proxies_enabled() -> bool:
     return bool(_pool)
 
 
-def proxy_sticky_url(url: str, session_id: str = "ibalcf") -> str:
-    """DataImpulse: sessid fija la IP ~30 min (requerido por CapSolver Cloudflare)."""
-    parsed = urlparse(url)
-    if not parsed.hostname:
-        raise ValueError(f"Proxy inválido: {url}")
-    user = parsed.username or ""
-    if session_id and f"sessid.{session_id}" not in user:
-        user = f"{user};sessid.{session_id}"
-    port = parsed.port or (1080 if parsed.scheme == "socks5" else 8080)
-    auth = f"{user}:{parsed.password}" if parsed.password else user
-    return f"{parsed.scheme}://{auth}@{parsed.hostname}:{port}"
+def parse_proxy_parts(url: str) -> dict[str, Any]:
+    """Parsea proxy DataImpulse sin depender de urlparse (username puede llevar ;)."""
+    raw = (url or "").strip()
+    if not raw:
+        raise ValueError("Proxy vacío")
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    scheme, rest = raw.split("://", 1)
+    scheme = scheme.lower()
+    if "@" not in rest:
+        raise ValueError(f"Proxy sin credenciales: {url}")
+    auth, hostport = rest.rsplit("@", 1)
+    username, password = auth.rsplit(":", 1)
+    username = unquote(username)
+    password = unquote(password)
+    if ":" in hostport:
+        hostname, port_str = hostport.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        hostname = hostport
+        port = 823 if scheme in {"http", "https"} else 1080
+    return {
+        "scheme": scheme,
+        "username": username,
+        "password": password,
+        "hostname": hostname,
+        "port": port,
+    }
+
+
+def with_sticky_session(username: str, session_id: str) -> str:
+    if not session_id or f"sessid.{session_id}" in username:
+        return username
+    return f"{username};sessid.{session_id}"
+
+
+def httpx_proxy_url(url: str, sticky_session: str = "") -> str:
+    parts = parse_proxy_parts(url)
+    username = parts["username"]
+    if sticky_session:
+        username = with_sticky_session(username, sticky_session)
+    user = quote(username, safe=";._-~")
+    password = quote(parts["password"], safe="")
+    return f"http://{user}:{password}@{parts['hostname']}:{parts['port']}"
+
+
+def playwright_proxy_config(
+    url: str,
+    sticky_session: str = "",
+    protocol: str = "http",
+) -> dict[str, Any]:
+    parts = parse_proxy_parts(url)
+    username = parts["username"]
+    if sticky_session:
+        username = with_sticky_session(username, sticky_session)
+    server_scheme = protocol if protocol in {"http", "socks5"} else "http"
+    return {
+        "server": f"{server_scheme}://{parts['hostname']}:{parts['port']}",
+        "username": username,
+        "password": parts["password"],
+    }
 
 
 def proxy_to_capsolver_format(url: str, sticky_session: str = "") -> str:
+    parts = parse_proxy_parts(url)
+    username = parts["username"]
     if sticky_session:
-        url = proxy_sticky_url(url, sticky_session)
-    parsed = urlparse(url)
-    if not parsed.hostname:
-        raise ValueError(f"Proxy inválido: {url}")
-    port = parsed.port or (1080 if parsed.scheme == "socks5" else 8080)
-    user = parsed.username or ""
-    password = parsed.password or ""
-    return f"{parsed.hostname}:{port}:{user}:{password}"
+        username = with_sticky_session(username, sticky_session)
+    return f"{parts['hostname']}:{parts['port']}:{username}:{parts['password']}"
 
 
-def parse_proxy(url: str) -> dict[str, Any]:
-    parsed = urlparse(url)
-    if not parsed.hostname:
-        raise ValueError(f"Proxy inválido: {url}")
-    port = parsed.port or (1080 if parsed.scheme == "socks5" else 8080)
-    out: dict[str, Any] = {"server": f"{parsed.scheme}://{parsed.hostname}:{port}"}
-    if parsed.username:
-        out["username"] = parsed.username
-    if parsed.password:
-        out["password"] = parsed.password
-    return out
+def parse_proxy(url: str, sticky_session: str = "") -> dict[str, Any]:
+    return playwright_proxy_config(url, sticky_session=sticky_session)
+
+
+async def verify_proxy(url: str, sticky_session: str = "") -> tuple[bool, str]:
+    proxy = httpx_proxy_url(url, sticky_session)
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy,
+            timeout=httpx.Timeout(25.0),
+            follow_redirects=True,
+        ) as client:
+            res = await client.get("https://api.ipify.org/")
+            res.raise_for_status()
+            ip = res.text.strip()
+            logger.info("Proxy verificado OK (IP %s)", ip)
+            return True, ip
+    except Exception as exc:
+        logger.warning("Proxy no responde (%s): %s", sticky_session or "rotativo", exc)
+        return False, str(exc)
 
 
 def mark_proxy_blocked(url: str) -> None:
@@ -74,8 +131,8 @@ def mark_proxy_blocked(url: str) -> None:
     logger.warning("Proxy en pausa %s...", url.split("@")[-1][:40])
 
 
-def next_proxy() -> Optional[tuple[dict[str, Any], str]]:
-    """Devuelve (config Playwright, url original del pool) o None."""
+def next_proxy() -> Optional[tuple[str, str]]:
+    """Devuelve (url original del pool, url original) — config se arma aparte."""
     if not settings.proxy_rotate:
         if settings.proxy_list and not _pool:
             _init_pool()
@@ -83,7 +140,7 @@ def next_proxy() -> Optional[tuple[dict[str, Any], str]]:
             url = _pool[0]
             if time.time() < _blocked.get(url, 0):
                 return None
-            return parse_proxy(url), url
+            return url, url
         return None
 
     if not _pool:
@@ -95,6 +152,16 @@ def next_proxy() -> Optional[tuple[dict[str, Any], str]]:
     for _ in range(len(_pool)):
         url = next(_cycle)
         if now >= _blocked.get(url, 0):
-            return parse_proxy(url), url
+            return url, url
     logger.warning("Todos los proxies están en pausa por límite IBAL")
     return None
+
+
+# Compatibilidad con código que usaba proxy_sticky_url
+def proxy_sticky_url(url: str, session_id: str = "ibalcf") -> str:
+    parts = parse_proxy_parts(url)
+    username = with_sticky_session(parts["username"], session_id)
+    return (
+        f"{parts['scheme']}://{username}:{parts['password']}"
+        f"@{parts['hostname']}:{parts['port']}"
+    )

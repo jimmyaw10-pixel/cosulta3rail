@@ -24,7 +24,14 @@ from app.captcha_solver import (
     solver_disponible,
 )
 from app.parser import es_challenge_cloudflare
-from app.proxy import mark_proxy_blocked, next_proxy, parse_proxy, proxies_enabled, proxy_sticky_url
+from app.proxy import (
+    httpx_proxy_url,
+    mark_proxy_blocked,
+    next_proxy,
+    playwright_proxy_config,
+    proxies_enabled,
+    verify_proxy,
+)
 
 logger = logging.getLogger("ibal")
 
@@ -167,6 +174,134 @@ async def consultar_http(matricula: str) -> ConsultaResponse:
         if parsed:
             return parsed
         return _empty_consulta(matricula, result.text, "http")
+
+
+def _cf_cookies_dict(solution: dict) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    raw = solution.get("cookies") or []
+    if isinstance(raw, dict):
+        for name, value in raw.items():
+            cookies[str(name)] = str(value)
+    else:
+        for item in raw:
+            if isinstance(item, dict) and item.get("name"):
+                cookies[str(item["name"])] = str(item.get("value", ""))
+    token = solution.get("token")
+    if token and "cf_clearance" not in cookies:
+        cookies["cf_clearance"] = str(token)
+    return cookies
+
+
+async def consultar_httpx_proxy(matricula: str) -> ConsultaResponse:
+    """Consulta IBAL vía httpx + proxy (evita ERR_TUNNEL de Playwright en Railway)."""
+    global _current_proxy_url
+    picked = next_proxy()
+    if not picked:
+        if proxies_enabled():
+            raise ConsultaError(
+                "Todos los proxies están en pausa. Espera unos minutos o agrega más IPs.",
+                status_code=429,
+            )
+        raise ConsultaError("No hay proxy configurado.", status_code=502)
+
+    _current_proxy_url, _ = picked
+    sticky = "ibalcf"
+    ok, detail = await verify_proxy(_current_proxy_url, sticky)
+    if not ok:
+        ok, detail = await verify_proxy(_current_proxy_url, "")
+        sticky = ""
+    if not ok:
+        raise ConsultaError(
+            f"No se pudo conectar al proxy DataImpulse desde el servidor: {detail}",
+            status_code=502,
+        )
+
+    user_agent = USER_AGENT
+    cookies: dict[str, str] = {}
+    if (
+        settings.ibal_cloudflare_bypass
+        and solver_disponible()
+        and (settings.captcha_solver or "").strip().lower() == "capsolver"
+    ):
+        try:
+            cf_solution = await solve_cloudflare(_current_proxy_url)
+            if cf_solution.get("userAgent"):
+                user_agent = str(cf_solution["userAgent"])
+            cookies = _cf_cookies_dict(cf_solution)
+            logger.info("Cloudflare cf_clearance obtenido (%s cookies)", len(cookies))
+        except (CaptchaSolverError, httpx.HTTPError) as exc:
+            logger.warning("Bypass Cloudflare CapSolver falló: %s", exc)
+
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+        "Origin": "https://ibal.gov.co",
+        "Referer": settings.ibal_base_url,
+    }
+    proxy = httpx_proxy_url(_current_proxy_url, sticky)
+    timeout = httpx.Timeout(settings.ibal_timeout_seconds)
+
+    async with httpx.AsyncClient(
+        proxy=proxy,
+        timeout=timeout,
+        follow_redirects=True,
+        headers=headers,
+        cookies=cookies,
+    ) as client:
+        landing = await client.get(settings.ibal_base_url)
+        landing.raise_for_status()
+        html = landing.text
+
+        if es_challenge_cloudflare(html) and not cookies:
+            raise ConsultaError(
+                "Cloudflare bloquea el acceso. CapSolver no pudo obtener cf_clearance.",
+                status_code=502,
+            )
+
+        csrf = _extract_csrf(html)
+        if not csrf:
+            bloqueo = ibal_block_message(html)
+            if bloqueo:
+                mark_proxy_blocked(_current_proxy_url)
+                raise ConsultaError(bloqueo, status_code=429)
+            antibot = detect_antibot_page(html)
+            raise ConsultaError(
+                antibot or "No se pudo obtener el token CSRF de IBAL.",
+                status_code=502,
+            )
+
+        proveedor = _resolver_proveedor(0)
+        if not proveedor:
+            raise ConsultaError(
+                "Se requiere CapSolver para reCAPTCHA v3 con proxy.",
+                status_code=502,
+            )
+        try:
+            token = await solve_recaptcha_v3(
+                proveedor,
+                user_agent=user_agent,
+                proxy_url=_current_proxy_url,
+            )
+        except CaptchaSolverError as exc:
+            raise ConsultaError(
+                f"No se pudo resolver reCAPTCHA ({proveedor}): {exc}",
+                status_code=502,
+            ) from exc
+
+        result = await client.post(
+            settings.ibal_base_url,
+            data={
+                "csrf_test_name": csrf,
+                "g-recaptcha-response": token,
+                "matricula_cliente": matricula,
+            },
+        )
+        result.raise_for_status()
+        parsed = _build_response(matricula, result.text, "httpx-proxy")
+        if parsed:
+            return parsed
+        return _empty_consulta(matricula, result.text, "httpx-proxy")
 
 
 async def start_browser() -> None:
@@ -515,10 +650,17 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     _current_proxy_url = None
     picked = next_proxy()
     if picked:
-        proxy_cfg, _current_proxy_url = picked
-        sticky_url = proxy_sticky_url(_current_proxy_url, "ibalcf")
-        proxy_cfg = parse_proxy(sticky_url)
-        logger.info("Consulta IBAL vía proxy sticky %s", sticky_url.split("@")[-1])
+        _current_proxy_url, _ = picked
+        sticky = "ibalcf"
+        ok, _ = await verify_proxy(_current_proxy_url, sticky)
+        if not ok:
+            sticky = ""
+        proxy_cfg = playwright_proxy_config(_current_proxy_url, sticky_session=sticky)
+        logger.info(
+            "Playwright proxy %s (sticky=%s)",
+            proxy_cfg["server"],
+            bool(sticky),
+        )
     elif proxies_enabled():
         raise ConsultaError(
             "Todos los proxies están en pausa por límite IBAL. Espera unos minutos o agrega más IPs al pool.",
@@ -588,6 +730,14 @@ async def consultar_factura(matricula: str) -> ConsultaResponse:
     matricula = validar_matricula(matricula)
     await _esperar_cupo_ibal()
     engine = (settings.ibal_engine or "auto").strip().lower()
+
+    if proxies_enabled():
+        try:
+            return await consultar_httpx_proxy(matricula)
+        except ConsultaError as exc:
+            logger.warning("httpx+proxy falló (%s), probando navegador", exc)
+            if engine == "http":
+                raise
 
     if engine == "http":
         return await consultar_http(matricula)
