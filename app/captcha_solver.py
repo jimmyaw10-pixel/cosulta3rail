@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -27,27 +27,77 @@ def _resolver_proveedor(intento: int) -> Optional[str]:
     return None
 
 
-def _task_types() -> list[str]:
+def _task_types(proxy_url: Optional[str] = None) -> list[str]:
     primary = (settings.captcha_task_type or "ReCaptchaV3M1TaskProxyLess").strip()
     fallbacks = [
         "ReCaptchaV3M1TaskProxyLess",
         "ReCaptchaV3TaskProxyLess",
         "ReCaptchaV3EnterpriseTaskProxyLess",
     ]
+    if proxy_url:
+        fallbacks.extend(
+            [
+                "ReCaptchaV3Task",
+                "ReCaptchaV3EnterpriseTask",
+            ]
+        )
     ordered = [primary] + [t for t in fallbacks if t != primary]
-    return ordered
+    seen: set[str] = set()
+    out: list[str] = []
+    for task_type in ordered:
+        if task_type not in seen:
+            seen.add(task_type)
+            out.append(task_type)
+    return out
 
 
-def _min_scores(intento: int) -> list[float]:
-    base = settings.captcha_min_score
-    scores = [base, 0.7, 0.5]
-    unique: list[float] = []
-    for s in scores:
-        if s not in unique:
-            unique.append(s)
-    if intento > 0 and 0.9 not in unique:
-        unique.insert(0, 0.9)
-    return unique
+def _build_capsolver_recaptcha_task(
+    page_url: str,
+    site_key: str,
+    action: str,
+    task_type: str,
+    proxy_url: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> dict[str, Any]:
+    task: dict[str, Any] = {
+        "type": task_type,
+        "websiteURL": page_url,
+        "websiteKey": site_key,
+    }
+    if action:
+        task["pageAction"] = action
+    proxyless = "ProxyLess" in task_type
+    if not proxyless and proxy_url:
+        from app.proxy import proxy_sticky_url, proxy_to_capsolver_format
+
+        sticky = proxy_sticky_url(proxy_url, "ibalcf")
+        task["proxy"] = proxy_to_capsolver_format(sticky)
+    if user_agent and not proxyless:
+        task["userAgent"] = user_agent
+    return task
+
+
+async def _capsolver_create_task(client: httpx.AsyncClient, task: dict[str, Any]) -> str:
+    res = await client.post(
+        "https://api.capsolver.com/createTask",
+        json={"clientKey": settings.captcha_api_key, "task": task},
+    )
+    try:
+        data = res.json()
+    except Exception as exc:
+        raise CaptchaSolverError(
+            f"CapSolver respuesta inválida (HTTP {res.status_code}): {res.text[:300]}"
+        ) from exc
+    if data.get("errorId"):
+        code = data.get("errorCode") or "ERROR"
+        desc = data.get("errorDescription") or data
+        raise CaptchaSolverError(f"CapSolver {code}: {desc}")
+    if res.status_code >= 400:
+        raise CaptchaSolverError(f"CapSolver HTTP {res.status_code}: {data}")
+    task_id = data.get("taskId")
+    if not task_id:
+        raise CaptchaSolverError(f"CapSolver sin taskId: {data}")
+    return str(task_id)
 
 
 async def _poll_2captcha(client: httpx.AsyncClient, task_id: str) -> str:
@@ -136,70 +186,42 @@ async def _poll_capsolver(client: httpx.AsyncClient, task_id: str) -> str:
 
 
 async def solve_cloudflare(proxy_url: str) -> dict:
-    from app.proxy import proxy_to_capsolver_format
+    from app.proxy import proxy_sticky_url, proxy_to_capsolver_format
 
-    proxy = proxy_to_capsolver_format(proxy_url)
+    sticky = proxy_sticky_url(proxy_url, "ibalcf")
+    proxy = proxy_to_capsolver_format(sticky)
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
-        create = await client.post(
-            "https://api.capsolver.com/createTask",
-            json={
-                "clientKey": settings.captcha_api_key,
-                "task": {
-                    "type": "AntiCloudflareTask",
-                    "websiteURL": settings.ibal_base_url,
-                    "proxy": proxy,
-                },
+        task_id = await _capsolver_create_task(
+            client,
+            {
+                "type": "AntiCloudflareTask",
+                "websiteURL": settings.ibal_base_url,
+                "proxy": proxy,
             },
         )
-        create.raise_for_status()
-        data = create.json()
-        if data.get("errorId"):
-            raise CaptchaSolverError(
-                f"CapSolver Cloudflare: {data.get('errorDescription', data)}"
-            )
-        task_id = data.get("taskId")
-        if not task_id:
-            raise CaptchaSolverError(f"CapSolver Cloudflare sin taskId: {data}")
         logger.info("CapSolver Cloudflare tarea %s", task_id)
         return await _poll_capsolver_solution(client, task_id)
-
 
 
 async def _solve_capsolver_once(
     page_url: str,
     site_key: str,
     action: str,
-    min_score: float,
     task_type: str,
+    proxy_url: Optional[str] = None,
     user_agent: Optional[str] = None,
 ) -> str:
-    task: dict = {
-        "type": task_type,
-        "websiteURL": page_url,
-        "websiteKey": site_key,
-        "pageAction": action,
-        "minScore": min_score,
-    }
-    if user_agent:
-        task["userAgent"] = user_agent
+    task = _build_capsolver_recaptcha_task(
+        page_url,
+        site_key,
+        action,
+        task_type,
+        proxy_url=proxy_url,
+        user_agent=user_agent,
+    )
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        create = await client.post(
-            "https://api.capsolver.com/createTask",
-            json={"clientKey": settings.captcha_api_key, "task": task},
-        )
-        create.raise_for_status()
-        data = create.json()
-        if data.get("errorId"):
-            raise CaptchaSolverError(f"CapSolver create: {data.get('errorDescription', data)}")
-        task_id = data.get("taskId")
-        if not task_id:
-            raise CaptchaSolverError(f"CapSolver sin taskId: {data}")
-        logger.info(
-            "CapSolver tarea %s (%s, score %.1f)",
-            task_id,
-            task_type,
-            min_score,
-        )
+        task_id = await _capsolver_create_task(client, task)
+        logger.info("CapSolver tarea %s (%s)", task_id, task_type)
         return await _poll_capsolver(client, task_id)
 
 
@@ -207,24 +229,26 @@ async def _solve_capsolver(
     page_url: str,
     site_key: str,
     action: str,
-    min_score: float,
+    proxy_url: Optional[str] = None,
     user_agent: Optional[str] = None,
 ) -> str:
-    primary = (settings.captcha_task_type or "ReCaptchaV3M1TaskProxyLess").strip()
-    try:
-        return await _solve_capsolver_once(
-            page_url, site_key, action, min_score, primary, user_agent
-        )
-    except CaptchaSolverError as exc:
-        logger.warning("CapSolver %s falló (%s); probando fallback", primary, exc)
-    fallback = (
-        "ReCaptchaV3TaskProxyLess"
-        if "M1" in primary
-        else "ReCaptchaV3M1TaskProxyLess"
-    )
-    return await _solve_capsolver_once(
-        page_url, site_key, action, 0.7, fallback, user_agent
-    )
+    last_error: Optional[Exception] = None
+    for task_type in _task_types(proxy_url):
+        try:
+            return await _solve_capsolver_once(
+                page_url,
+                site_key,
+                action,
+                task_type,
+                proxy_url=proxy_url,
+                user_agent=user_agent,
+            )
+        except CaptchaSolverError as exc:
+            last_error = exc
+            logger.warning("CapSolver %s falló: %s", task_type, exc)
+    if last_error:
+        raise last_error
+    raise CaptchaSolverError("CapSolver no pudo crear ninguna tarea reCAPTCHA")
 
 
 async def solve_recaptcha_v3(
@@ -234,14 +258,21 @@ async def solve_recaptcha_v3(
     action: Optional[str] = None,
     min_score: Optional[float] = None,
     user_agent: Optional[str] = None,
+    proxy_url: Optional[str] = None,
 ) -> str:
     page_url = page_url or settings.ibal_base_url
     site_key = site_key or settings.recaptcha_site_key
     action = action or settings.recaptcha_action
-    min_score = settings.captcha_min_score if min_score is None else min_score
     provider = provider.strip().lower()
     if provider == "2captcha":
-        return await _solve_2captcha(page_url, site_key, action, min_score)
+        score = settings.captcha_min_score if min_score is None else min_score
+        return await _solve_2captcha(page_url, site_key, action, score)
     if provider == "capsolver":
-        return await _solve_capsolver(page_url, site_key, action, min_score, user_agent)
+        return await _solve_capsolver(
+            page_url,
+            site_key,
+            action,
+            proxy_url=proxy_url,
+            user_agent=user_agent,
+        )
     raise CaptchaSolverError(f"Proveedor de captcha desconocido: {provider}")

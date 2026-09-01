@@ -24,7 +24,7 @@ from app.captcha_solver import (
     solver_disponible,
 )
 from app.parser import es_challenge_cloudflare
-from app.proxy import mark_proxy_blocked, next_proxy, proxies_enabled
+from app.proxy import mark_proxy_blocked, next_proxy, parse_proxy, proxies_enabled, proxy_sticky_url
 
 logger = logging.getLogger("ibal")
 
@@ -237,17 +237,29 @@ async def _simular_usuario(page) -> None:
 
 async def _cookies_cloudflare(solution: dict) -> list[dict]:
     out: list[dict] = []
-    for item in solution.get("cookies") or []:
-        if not isinstance(item, dict) or not item.get("name"):
-            continue
-        out.append(
-            {
-                "name": str(item["name"]),
-                "value": str(item.get("value", "")),
-                "domain": str(item.get("domain") or ".ibal.gov.co"),
-                "path": str(item.get("path") or "/"),
-            }
-        )
+    cookies_raw = solution.get("cookies") or []
+    if isinstance(cookies_raw, dict):
+        for name, value in cookies_raw.items():
+            out.append(
+                {
+                    "name": str(name),
+                    "value": str(value),
+                    "domain": ".ibal.gov.co",
+                    "path": "/",
+                }
+            )
+    else:
+        for item in cookies_raw:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            out.append(
+                {
+                    "name": str(item["name"]),
+                    "value": str(item.get("value", "")),
+                    "domain": str(item.get("domain") or ".ibal.gov.co"),
+                    "path": str(item.get("path") or "/"),
+                }
+            )
     token = solution.get("token")
     if token and not any(c["name"] == "cf_clearance" for c in out):
         out.append(
@@ -433,6 +445,7 @@ async def _obtener_token(page, intento: int) -> tuple[str, str]:
                 proveedor,
                 action=action,
                 user_agent=USER_AGENT,
+                proxy_url=_current_proxy_url,
             )
             return token, proveedor
         except CaptchaSolverError as exc:
@@ -503,6 +516,9 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     picked = next_proxy()
     if picked:
         proxy_cfg, _current_proxy_url = picked
+        sticky_url = proxy_sticky_url(_current_proxy_url, "ibalcf")
+        proxy_cfg = parse_proxy(sticky_url)
+        logger.info("Consulta IBAL vía proxy sticky %s", sticky_url.split("@")[-1])
     elif proxies_enabled():
         raise ConsultaError(
             "Todos los proxies están en pausa por límite IBAL. Espera unos minutos o agrega más IPs al pool.",
@@ -519,7 +535,6 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
     }
     if proxy_cfg:
         context_kwargs["proxy"] = proxy_cfg
-        logger.info("Consulta IBAL vía proxy %s", _current_proxy_url)
 
     user_agent = USER_AGENT
     cf_cookies: list[dict] = []
@@ -535,7 +550,7 @@ async def consultar_browser(matricula: str) -> ConsultaResponse:
                 user_agent = str(cf_solution["userAgent"])
             cf_cookies = await _cookies_cloudflare(cf_solution)
             logger.info("Cloudflare cf_clearance obtenido (%s cookies)", len(cf_cookies))
-        except CaptchaSolverError as exc:
+        except (CaptchaSolverError, httpx.HTTPError) as exc:
             logger.warning("Bypass Cloudflare CapSolver falló: %s", exc)
 
     context_kwargs["user_agent"] = user_agent

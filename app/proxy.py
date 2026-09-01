@@ -31,7 +31,22 @@ def proxies_enabled() -> bool:
     return bool(_pool)
 
 
-def proxy_to_capsolver_format(url: str) -> str:
+def proxy_sticky_url(url: str, session_id: str = "ibalcf") -> str:
+    """DataImpulse: sessid fija la IP ~30 min (requerido por CapSolver Cloudflare)."""
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        raise ValueError(f"Proxy inválido: {url}")
+    user = parsed.username or ""
+    if session_id and f"sessid.{session_id}" not in user:
+        user = f"{user};sessid.{session_id}"
+    port = parsed.port or (1080 if parsed.scheme == "socks5" else 8080)
+    auth = f"{user}:{parsed.password}" if parsed.password else user
+    return f"{parsed.scheme}://{auth}@{parsed.hostname}:{port}"
+
+
+def proxy_to_capsolver_format(url: str, sticky_session: str = "") -> str:
+    if sticky_session:
+        url = proxy_sticky_url(url, sticky_session)
     parsed = urlparse(url)
     if not parsed.hostname:
         raise ValueError(f"Proxy inválido: {url}")
