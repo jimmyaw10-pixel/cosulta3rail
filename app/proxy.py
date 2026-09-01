@@ -13,6 +13,26 @@ logger = logging.getLogger("proxy")
 _pool: list[str] = []
 _cycle = None
 _blocked: dict[str, float] = {}
+_gov_blocked: set[str] = set()
+
+DATAIMPULSE_GOV_MSG = (
+    "El proxy DataImpulse bloquea sitios .gov (ibal.gov.co). "
+    "DataImpulse no permite portales gubernamentales por defecto. "
+    "Opciones: pedir desbloqueo en support@dataimpulse.com (requiere KYC), "
+    "usar otro proxy residencial de Colombia, o dejar PROXY_LIST vacío."
+)
+
+
+def is_dataimpulse_site_blocked(text: str) -> bool:
+    upper = (text or "").upper()
+    return any(
+        marker in upper
+        for marker in (
+            "SITE_PERMANENTLY_BLOCKED",
+            "HOST_BLOCKED",
+            "403 SITE_PERMANENTLY",
+        )
+    )
 
 
 def _init_pool() -> None:
@@ -131,6 +151,12 @@ def mark_proxy_blocked(url: str) -> None:
     logger.warning("Proxy en pausa %s...", url.split("@")[-1][:40])
 
 
+def mark_proxy_gov_blocked(url: str) -> None:
+    _gov_blocked.add(url)
+    mark_proxy_blocked(url)
+    logger.warning("Proxy marcado como bloqueado para .gov: %s", url.split("@")[-1][:40])
+
+
 def next_proxy() -> Optional[tuple[str, str]]:
     """Devuelve (url original del pool, url original) — config se arma aparte."""
     if not settings.proxy_rotate:
@@ -138,6 +164,8 @@ def next_proxy() -> Optional[tuple[str, str]]:
             _init_pool()
         if _pool:
             url = _pool[0]
+            if url in _gov_blocked:
+                return None
             if time.time() < _blocked.get(url, 0):
                 return None
             return url, url
@@ -151,6 +179,8 @@ def next_proxy() -> Optional[tuple[str, str]]:
     now = time.time()
     for _ in range(len(_pool)):
         url = next(_cycle)
+        if url in _gov_blocked:
+            continue
         if now >= _blocked.get(url, 0):
             return url, url
     logger.warning("Todos los proxies están en pausa por límite IBAL")

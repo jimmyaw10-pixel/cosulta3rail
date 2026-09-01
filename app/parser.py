@@ -288,8 +288,12 @@ def detect_antibot_page(html: str) -> Optional[str]:
     if es_challenge_cloudflare(html):
         return (
             "Cloudflare/WAF bloqueó la IP del servidor antes de cargar IBAL. "
-            "En Railway necesitas PROXY_LIST con proxy residencial de Colombia y "
-            "CAPTCHA_SOLVER=capsolver para obtener cf_clearance."
+            "Usa un proxy residencial de Colombia que permita .gov (DataImpulse no sirve)."
+        )
+    if "site_permanently_blocked" in lower or "site_permanently_blocked" in html_lower:
+        return (
+            "El proxy bloquea ibal.gov.co (403 SITE_PERMANENTLY_BLOCKED). "
+            "DataImpulse no permite sitios .gov. Deja PROXY_LIST vacío o usa otro proveedor."
         )
     if "access denied" in lower or "forbidden" in lower or "403 forbidden" in lower:
         return "IBAL o la red bloqueó el acceso (403). Prueba sin proxy o con IP residencial Colombia."

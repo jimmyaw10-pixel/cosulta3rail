@@ -25,8 +25,11 @@ from app.captcha_solver import (
 )
 from app.parser import es_challenge_cloudflare
 from app.proxy import (
+    DATAIMPULSE_GOV_MSG,
     httpx_proxy_url,
+    is_dataimpulse_site_blocked,
     mark_proxy_blocked,
+    mark_proxy_gov_blocked,
     next_proxy,
     playwright_proxy_config,
     proxies_enabled,
@@ -192,6 +195,79 @@ def _cf_cookies_dict(solution: dict) -> dict[str, str]:
     return cookies
 
 
+def _check_proxy_block_response(status_code: int, body: str, proxy_url: str) -> None:
+    if status_code == 403 and is_dataimpulse_site_blocked(body):
+        mark_proxy_gov_blocked(proxy_url)
+        raise ConsultaError(DATAIMPULSE_GOV_MSG, status_code=502)
+
+
+async def consultar_httpx_capsolver(matricula: str) -> ConsultaResponse:
+    """Consulta directa desde Railway + CapSolver (sin proxy)."""
+    global _current_proxy_url
+    _current_proxy_url = None
+
+    proveedor = _resolver_proveedor(0)
+    if not proveedor:
+        raise ConsultaError(
+            "Se requiere CapSolver configurado para consultar IBAL.",
+            status_code=502,
+        )
+
+    timeout = httpx.Timeout(settings.ibal_timeout_seconds)
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers=_headers(),
+    ) as client:
+        landing = await client.get(settings.ibal_base_url)
+        if landing.status_code == 403 and is_dataimpulse_site_blocked(landing.text):
+            raise ConsultaError(DATAIMPULSE_GOV_MSG, status_code=502)
+        landing.raise_for_status()
+        html = landing.text
+
+        if es_challenge_cloudflare(html):
+            raise ConsultaError(
+                "Cloudflare bloquea la IP de Railway. Necesitas un proxy que permita "
+                "ibal.gov.co (DataImpulse no sirve: bloquea .gov).",
+                status_code=502,
+            )
+
+        csrf = _extract_csrf(html)
+        if not csrf:
+            bloqueo = ibal_block_message(html)
+            if bloqueo:
+                raise ConsultaError(bloqueo, status_code=429)
+            antibot = detect_antibot_page(html)
+            raise ConsultaError(
+                antibot or "No se pudo obtener el token CSRF de IBAL.",
+                status_code=502,
+            )
+
+        try:
+            token = await solve_recaptcha_v3(proveedor, user_agent=USER_AGENT)
+        except CaptchaSolverError as exc:
+            raise ConsultaError(
+                f"No se pudo resolver reCAPTCHA ({proveedor}): {exc}",
+                status_code=502,
+            ) from exc
+
+        result = await client.post(
+            settings.ibal_base_url,
+            data={
+                "csrf_test_name": csrf,
+                "g-recaptcha-response": token,
+                "matricula_cliente": matricula,
+            },
+        )
+        if result.status_code == 403 and is_dataimpulse_site_blocked(result.text):
+            raise ConsultaError(DATAIMPULSE_GOV_MSG, status_code=502)
+        result.raise_for_status()
+        parsed = _build_response(matricula, result.text, "httpx-capsolver")
+        if parsed:
+            return parsed
+        return _empty_consulta(matricula, result.text, "httpx-capsolver")
+
+
 async def consultar_httpx_proxy(matricula: str) -> ConsultaResponse:
     """Consulta IBAL vía httpx + proxy (evita ERR_TUNNEL de Playwright en Railway)."""
     global _current_proxy_url
@@ -250,6 +326,7 @@ async def consultar_httpx_proxy(matricula: str) -> ConsultaResponse:
         cookies=cookies,
     ) as client:
         landing = await client.get(settings.ibal_base_url)
+        _check_proxy_block_response(landing.status_code, landing.text, _current_proxy_url)
         landing.raise_for_status()
         html = landing.text
 
@@ -297,6 +374,7 @@ async def consultar_httpx_proxy(matricula: str) -> ConsultaResponse:
                 "matricula_cliente": matricula,
             },
         )
+        _check_proxy_block_response(result.status_code, result.text, _current_proxy_url)
         result.raise_for_status()
         parsed = _build_response(matricula, result.text, "httpx-proxy")
         if parsed:
@@ -641,31 +719,32 @@ async def _post_con_token(page, matricula: str, token: str) -> str:
     return await response.text()
 
 
-async def consultar_browser(matricula: str) -> ConsultaResponse:
+async def consultar_browser(matricula: str, *, use_proxy: bool = True) -> ConsultaResponse:
     global _current_proxy_url
     if _browser is None:
         await start_browser()
 
     proxy_cfg = None
     _current_proxy_url = None
-    picked = next_proxy()
-    if picked:
-        _current_proxy_url, _ = picked
-        sticky = "ibalcf"
-        ok, _ = await verify_proxy(_current_proxy_url, sticky)
-        if not ok:
-            sticky = ""
-        proxy_cfg = playwright_proxy_config(_current_proxy_url, sticky_session=sticky)
-        logger.info(
-            "Playwright proxy %s (sticky=%s)",
-            proxy_cfg["server"],
-            bool(sticky),
-        )
-    elif proxies_enabled():
-        raise ConsultaError(
-            "Todos los proxies están en pausa por límite IBAL. Espera unos minutos o agrega más IPs al pool.",
-            status_code=429,
-        )
+    if use_proxy:
+        picked = next_proxy()
+        if picked:
+            _current_proxy_url, _ = picked
+            sticky = "ibalcf"
+            ok, _ = await verify_proxy(_current_proxy_url, sticky)
+            if not ok:
+                sticky = ""
+            proxy_cfg = playwright_proxy_config(_current_proxy_url, sticky_session=sticky)
+            logger.info(
+                "Playwright proxy %s (sticky=%s)",
+                proxy_cfg["server"],
+                bool(sticky),
+            )
+        elif proxies_enabled():
+            raise ConsultaError(
+                "Todos los proxies están en pausa por límite IBAL. Espera unos minutos o agrega más IPs al pool.",
+                status_code=429,
+            )
     context_kwargs: dict = {
         "user_agent": USER_AGENT,
         "locale": "es-CO",
@@ -730,25 +809,32 @@ async def consultar_factura(matricula: str) -> ConsultaResponse:
     matricula = validar_matricula(matricula)
     await _esperar_cupo_ibal()
     engine = (settings.ibal_engine or "auto").strip().lower()
+    proxy_gov_blocked = False
 
     if proxies_enabled():
         try:
             return await consultar_httpx_proxy(matricula)
         except ConsultaError as exc:
-            logger.warning("httpx+proxy falló (%s), probando navegador", exc)
-            if engine == "http":
-                raise
+            if is_dataimpulse_site_blocked(str(exc)) or "DataImpulse bloquea" in str(exc):
+                proxy_gov_blocked = True
+                logger.warning("Proxy bloquea ibal.gov.co; consultando sin proxy")
+            else:
+                logger.warning("httpx+proxy falló (%s), probando sin proxy", exc)
+                if engine == "http":
+                    raise
+
+    try:
+        return await consultar_httpx_capsolver(matricula)
+    except ConsultaError as exc:
+        if engine == "http" and not proxy_gov_blocked:
+            raise
+        logger.warning("httpx+CapSolver falló (%s), probando navegador", exc)
+    except httpx.HTTPError as exc:
+        if is_dataimpulse_site_blocked(str(exc)):
+            logger.warning("Proxy .gov bloqueado en fallback")
+        else:
+            logger.warning("Error HTTP directo (%s), probando navegador", exc)
 
     if engine == "http":
         return await consultar_http(matricula)
-    if engine == "browser":
-        return await consultar_browser(matricula)
-
-    try:
-        return await consultar_http(matricula)
-    except ConsultaError as exc:
-        logger.warning("HTTP falló (%s), usando navegador", exc)
-        return await consultar_browser(matricula)
-    except httpx.HTTPError as exc:
-        logger.warning("Error HTTP de IBAL (%s), usando navegador", exc)
-        return await consultar_browser(matricula)
+    return await consultar_browser(matricula, use_proxy=not proxy_gov_blocked)

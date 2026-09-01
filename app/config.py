@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     ibal_recaptcha_retries: int = 2
     ibal_recaptcha_warmup_ms: int = 3000
 
-    # Proxies DataImpulse Colombia (móvil rotativo)
+    # DataImpulse Colombia (móvil). Nota: DataImpulse puede bloquear .gov; hay fallback sin proxy.
     proxy_list: str = (
         "http://3bbadbcc00beec1de6fe__cr.co:95c0762ddd2b2a44@gw.dataimpulse.com:823"
     )
